@@ -113,8 +113,8 @@ func WriteFileMode(ctx context.Context, path string, data []byte, mode os.FileMo
 	if err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("atomic write: %w", err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("atomic write: %w", ctxErr)
 	}
 	dir := filepath.Dir(cleanPath)
 	tmp, err := os.CreateTemp(dir, opts.pattern())
@@ -171,8 +171,8 @@ func Prepare(ctx context.Context, path string, data []byte, opts *Options) (tmpP
 	if err != nil {
 		return "", nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return "", nil, fmt.Errorf("atomic write: %w", err)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", nil, fmt.Errorf("atomic write: %w", ctxErr)
 	}
 	dir := filepath.Dir(cleanPath)
 	tmp, err := os.CreateTemp(dir, opts.pattern())
@@ -289,8 +289,8 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 		return nil, err
 	}
 	defer f.Close()
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -299,8 +299,8 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 	if fi.Size() > maxBytes {
 		return nil, fmt.Errorf("%w: %d bytes (max %d)", ErrFileTooLarge, fi.Size(), maxBytes)
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
@@ -327,7 +327,7 @@ func fsyncDir(dir string) {
 
 // writeTempFile creates a temp file in dir, writes data, fsyncs, closes,
 // and chmods. Returns the temp file name on success.
-func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Options) (string, error) {
+func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Options) (tmpName string, retErr error) {
 	pattern := baseName + ".tmp-*"
 	if opts != nil && opts.TempPattern != "" {
 		pattern = opts.TempPattern
@@ -338,7 +338,7 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Op
 	}
 	name := tmp.Name()
 	defer func() {
-		if err != nil {
+		if retErr != nil {
 			_ = os.Remove(name)
 		}
 	}()
@@ -350,10 +350,10 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Op
 		_ = tmp.Close()
 		return "", err
 	}
-	if err = tmp.Close(); err != nil {
+	if err := tmp.Close(); err != nil {
 		return "", err
 	}
-	if err = os.Chmod(name, perm); err != nil {
+	if err := os.Chmod(name, perm); err != nil {
 		return "", err
 	}
 	return name, nil
