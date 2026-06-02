@@ -11,15 +11,21 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // DefaultTempPrefix is the default pattern used for temp files.
 const DefaultTempPrefix = ".atomicfile-*.tmp"
+
+// largeSaveJSONThreshold is the marshalled-payload size above which
+// SaveJSON emits a Warn log (but still proceeds).
+const largeSaveJSONThreshold = 16 << 20 // 16 MiB
 
 // ErrEmptyPath is returned when a path argument is empty.
 var ErrEmptyPath = errors.New("atomic write: empty path")
@@ -30,25 +36,115 @@ var ErrUnsafePath = errors.New("atomic write: unsafe path")
 // ErrFileTooLarge is returned when a file exceeds the size limit.
 var ErrFileTooLarge = errors.New("file too large")
 
-// Options configures atomic write behavior.
-type Options struct {
-	// TempPattern is the os.CreateTemp pattern for temp files.
-	// Defaults to DefaultTempPrefix if empty.
-	TempPattern string
+// ErrSymlinkTarget is returned when the target path is a symlink and
+// AllowSymlinkTarget is not set. Atomic rename replaces the symlink
+// itself, not the file it points to — which is rarely the caller's intent.
+var ErrSymlinkTarget = errors.New("atomic write: target is a symlink")
+
+// cfg holds resolved configuration for atomic write operations.
+type cfg struct {
+	logger             *slog.Logger
+	tempPattern        string
+	mode               os.FileMode
+	mkdirMode          os.FileMode
+	preserveMode       bool
+	preserveOwnership  bool
+	noSync             bool
+	allowSymlinkTarget bool
 }
 
-func (o *Options) pattern() string {
-	if o != nil && o.TempPattern != "" {
-		return o.TempPattern
+// Option configures an atomic write operation.
+type Option func(*cfg)
+
+// WithLogger sets a custom logger. If not provided, slog.Default() is used.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *cfg) { c.logger = l }
+}
+
+// WithTempPattern sets the os.CreateTemp pattern for temp files.
+// Defaults to DefaultTempPrefix if not set.
+func WithTempPattern(pattern string) Option {
+	return func(c *cfg) { c.tempPattern = pattern }
+}
+
+// WithMode sets the file permission for the written file.
+// Defaults to 0o644 if not set.
+func WithMode(mode os.FileMode) Option {
+	return func(c *cfg) { c.mode = mode }
+}
+
+// WithMkdirMode causes write functions to create parent directories
+// with the specified permission before writing.
+func WithMkdirMode(mode os.FileMode) Option {
+	return func(c *cfg) { c.mkdirMode = mode }
+}
+
+// WithPreserveMode stats the target file before writing and applies
+// its existing mode to the new file. Falls back to the explicit mode
+// if the target does not exist.
+func WithPreserveMode() Option {
+	return func(c *cfg) { c.preserveMode = true }
+}
+
+// WithPreserveOwnership stats the target file before writing and
+// chowns the temp file to match the target's uid/gid.
+// Requires CAP_CHOWN or root. No-op if target doesn't exist.
+func WithPreserveOwnership() Option {
+	return func(c *cfg) { c.preserveOwnership = true }
+}
+
+// WithNoSync skips fsync on the temp file and parent directory.
+// This provides atomicity without durability.
+func WithNoSync() Option {
+	return func(c *cfg) { c.noSync = true }
+}
+
+// WithAllowSymlinkTarget permits writing to a path that is currently
+// a symlink. By default, symlink targets are refused with ErrSymlinkTarget.
+func WithAllowSymlinkTarget() Option {
+	return func(c *cfg) { c.allowSymlinkTarget = true }
+}
+
+func buildCfg(opts []Option) *cfg {
+	c := &cfg{mode: 0o644, tempPattern: DefaultTempPrefix}
+	for _, o := range opts {
+		if o != nil {
+			o(c)
+		}
 	}
-	return DefaultTempPrefix
+	if c.logger == nil {
+		c.logger = slog.Default()
+	}
+	if c.tempPattern == "" {
+		c.tempPattern = DefaultTempPrefix
+	}
+	return c
 }
 
-// validateAbsClean checks that path is absolute, free of ".." traversal,
-// and returns the cleaned form.
+// checkSymlink returns ErrSymlinkTarget if target is a symlink and
+// AllowSymlinkTarget is not set.
+func checkSymlink(target string, c *cfg) error {
+	if c.allowSymlinkTarget {
+		return nil
+	}
+	fi, err := os.Lstat(target)
+	if err != nil {
+		return nil
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", ErrSymlinkTarget, target)
+	}
+	return nil
+}
+
+// validateAbsClean checks that path is absolute, free of ".." traversal
+// and null bytes, and returns the cleaned form.
 func validateAbsClean(path string) (string, error) {
 	if path == "" {
 		return "", ErrEmptyPath
+	}
+	if strings.ContainsRune(path, 0) {
+		return "", fmt.Errorf("%w: contains null byte", ErrUnsafePath)
 	}
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
@@ -66,12 +162,20 @@ func validateAbsClean(path string) (string, error) {
 type WritePhase int
 
 const (
+	// PhaseTempCreate indicates failure creating the temp file.
 	PhaseTempCreate WritePhase = iota + 1
+	// PhaseTempWrite indicates failure writing to the temp file.
 	PhaseTempWrite
+	// PhaseTempChmod indicates failure setting permissions on the temp file.
 	PhaseTempChmod
+	// PhaseTempSync indicates failure syncing the temp file.
 	PhaseTempSync
+	// PhaseTempClose indicates failure closing the temp file.
 	PhaseTempClose
+	// PhaseRename indicates failure renaming temp to final path.
 	PhaseRename
+	// PhaseChown indicates failure changing ownership of the temp file.
+	PhaseChown
 )
 
 func (p WritePhase) String() string {
@@ -88,6 +192,8 @@ func (p WritePhase) String() string {
 		return "close temp file"
 	case PhaseRename:
 		return "rename to final path"
+	case PhaseChown:
+		return "chown temp file"
 	default:
 		return "unknown phase"
 	}
@@ -102,13 +208,47 @@ type WriteError struct {
 func (e *WriteError) Error() string { return e.Phase.String() + ": " + e.Err.Error() }
 func (e *WriteError) Unwrap() error { return e.Err }
 
-// WriteFile writes data to path atomically with mode 0644.
-func WriteFile(ctx context.Context, path string, data []byte) error {
-	return WriteFileMode(ctx, path, data, 0o644, nil)
+// resolveMode determines the file mode to use, considering PreserveMode.
+func resolveMode(target string, explicit os.FileMode, c *cfg) os.FileMode {
+	if c.preserveMode {
+		if fi, err := os.Stat(target); err == nil {
+			return fi.Mode().Perm()
+		}
+	}
+	return explicit
 }
 
-// WriteFileMode writes data to path atomically with the specified permissions.
-func WriteFileMode(ctx context.Context, path string, data []byte, mode os.FileMode, opts *Options) error {
+// applyOwnership chowns tmpName to match target's uid/gid if PreserveOwnership is set.
+func applyOwnership(tmpName, target string, c *cfg) error {
+	if !c.preserveOwnership {
+		return nil
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return nil
+	}
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	if err := os.Chown(tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
+		return &WriteError{Phase: PhaseChown, Err: err}
+	}
+	return nil
+}
+
+// ensureDir creates parent directories if MkdirMode is set.
+func ensureDir(dir string, c *cfg) error {
+	if c.mkdirMode != 0 {
+		return os.MkdirAll(dir, c.mkdirMode)
+	}
+	return nil
+}
+
+// WriteFile writes data to path atomically. Mode defaults to 0o644;
+// override with WithMode. Additional behavior configured via opts.
+func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) error {
+	c := buildCfg(opts)
 	cleanPath, err := validateAbsClean(path)
 	if err != nil {
 		return err
@@ -116,15 +256,22 @@ func WriteFileMode(ctx context.Context, path string, data []byte, mode os.FileMo
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("atomic write: %w", ctxErr)
 	}
+	if symErr := checkSymlink(cleanPath, c); symErr != nil {
+		return symErr
+	}
 	dir := filepath.Dir(cleanPath)
-	tmp, err := os.CreateTemp(dir, opts.pattern())
+	if mkErr := ensureDir(dir, c); mkErr != nil {
+		return mkErr
+	}
+	mode := resolveMode(cleanPath, c.mode, c)
+	tmp, err := os.CreateTemp(dir, c.tempPattern)
 	if err != nil {
 		return &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
 	tmpName := tmp.Name()
 	cleanup := func() {
 		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			slog.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
+			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
 		}
 	}
 	if _, err := tmp.Write(data); err != nil {
@@ -142,10 +289,12 @@ func WriteFileMode(ctx context.Context, path string, data []byte, mode os.FileMo
 		cleanup()
 		return &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return &WriteError{Phase: PhaseTempSync, Err: err}
+	if !c.noSync {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			cleanup()
+			return &WriteError{Phase: PhaseTempSync, Err: err}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		tmp.Close()
@@ -156,17 +305,193 @@ func WriteFileMode(ctx context.Context, path string, data []byte, mode os.FileMo
 		cleanup()
 		return &WriteError{Phase: PhaseTempClose, Err: err}
 	}
+	if err := applyOwnership(tmpName, cleanPath, c); err != nil {
+		cleanup()
+		return err
+	}
 	if err := os.Rename(tmpName, cleanPath); err != nil {
 		cleanup()
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	fsyncDir(dir)
+	if !c.noSync {
+		fsyncDir(dir, c.logger)
+	}
 	return nil
+}
+
+// WriteReader atomically writes the contents of r to path with the given mode.
+// If r implements io.WriterTo, it is used for efficient copying.
+func WriteReader(ctx context.Context, path string, r io.Reader, mode os.FileMode, opts ...Option) error {
+	c := buildCfg(opts)
+	cleanPath, err := validateAbsClean(path)
+	if err != nil {
+		return err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("atomic write: %w", ctxErr)
+	}
+	if symErr := checkSymlink(cleanPath, c); symErr != nil {
+		return symErr
+	}
+	dir := filepath.Dir(cleanPath)
+	if mkErr := ensureDir(dir, c); mkErr != nil {
+		return mkErr
+	}
+	mode = resolveMode(cleanPath, mode, c)
+	tmp, err := os.CreateTemp(dir, c.tempPattern)
+	if err != nil {
+		return &WriteError{Phase: PhaseTempCreate, Err: err}
+	}
+	tmpName := tmp.Name()
+	cleanup := func() {
+		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
+		}
+	}
+	var writeErr error
+	if wt, ok := r.(io.WriterTo); ok {
+		_, writeErr = wt.WriteTo(tmp)
+	} else {
+		_, writeErr = io.Copy(tmp, r)
+	}
+	if writeErr != nil {
+		tmp.Close()
+		cleanup()
+		return &WriteError{Phase: PhaseTempWrite, Err: writeErr}
+	}
+	if err := ctx.Err(); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("atomic write: %w", err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		cleanup()
+		return &WriteError{Phase: PhaseTempChmod, Err: err}
+	}
+	if !c.noSync {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			cleanup()
+			return &WriteError{Phase: PhaseTempSync, Err: err}
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return &WriteError{Phase: PhaseTempClose, Err: err}
+	}
+	if err := applyOwnership(tmpName, cleanPath, c); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmpName, cleanPath); err != nil {
+		cleanup()
+		return &WriteError{Phase: PhaseRename, Err: err}
+	}
+	if !c.noSync {
+		fsyncDir(dir, c.logger)
+	}
+	return nil
+}
+
+// PendingFile is a pending temporary file, waiting to replace the
+// destination path in a call to CommitFile. It embeds *os.File so
+// callers get full io.Writer/io.ReaderFrom/fmt.Fprintf support.
+type PendingFile struct {
+	*os.File
+	logger *slog.Logger
+	cfg    *cfg
+	path   string
+	dir    string
+	mode   os.FileMode
+	done   bool
+}
+
+// NewPendingFile creates a temporary file destined to atomically replace
+// the file at path. Write to it, then call CommitFile to finalize or
+// Cleanup to abort.
+func NewPendingFile(path string, mode os.FileMode, opts ...Option) (*PendingFile, error) {
+	c := buildCfg(opts)
+	cleanPath, err := validateAbsClean(path)
+	if err != nil {
+		return nil, err
+	}
+	if symErr := checkSymlink(cleanPath, c); symErr != nil {
+		return nil, symErr
+	}
+	dir := filepath.Dir(cleanPath)
+	if mkErr := ensureDir(dir, c); mkErr != nil {
+		return nil, mkErr
+	}
+	mode = resolveMode(cleanPath, mode, c)
+	tmp, err := os.CreateTemp(dir, c.tempPattern)
+	if err != nil {
+		return nil, &WriteError{Phase: PhaseTempCreate, Err: err}
+	}
+	return &PendingFile{
+		File:   tmp,
+		path:   cleanPath,
+		dir:    dir,
+		mode:   mode,
+		logger: c.logger,
+		cfg:    c,
+	}, nil
+}
+
+// CommitFile syncs, closes, and atomically renames the temp file to the
+// destination path. After CommitFile, Cleanup is a no-op.
+func (p *PendingFile) CommitFile() error {
+	if p.done {
+		return nil
+	}
+	p.done = true
+	tmpName := p.Name()
+	if err := p.Chmod(p.mode); err != nil {
+		p.Close()
+		os.Remove(tmpName)
+		return &WriteError{Phase: PhaseTempChmod, Err: err}
+	}
+	if !p.cfg.noSync {
+		if err := p.Sync(); err != nil {
+			p.Close()
+			os.Remove(tmpName)
+			return &WriteError{Phase: PhaseTempSync, Err: err}
+		}
+	}
+	if err := p.Close(); err != nil {
+		os.Remove(tmpName)
+		return &WriteError{Phase: PhaseTempClose, Err: err}
+	}
+	if err := applyOwnership(tmpName, p.path, p.cfg); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, p.path); err != nil {
+		os.Remove(tmpName)
+		return &WriteError{Phase: PhaseRename, Err: err}
+	}
+	if !p.cfg.noSync {
+		fsyncDir(p.dir, p.logger)
+	}
+	return nil
+}
+
+// Cleanup closes and removes the temp file. It is a no-op if CommitFile
+// has already been called. Safe to defer immediately after NewPendingFile.
+func (p *PendingFile) Cleanup() error {
+	if p.done {
+		return nil
+	}
+	p.done = true
+	tmpName := p.Name()
+	p.Close()
+	return os.Remove(tmpName)
 }
 
 // Prepare creates a temp file with data written, synced, and closed —
 // ready for a final rename via Commit.
-func Prepare(ctx context.Context, path string, data []byte, opts *Options) (tmpPath string, cleanup func(), err error) {
+func Prepare(ctx context.Context, path string, data []byte, opts ...Option) (tmpPath string, cleanup func(), err error) {
+	c := buildCfg(opts)
 	cleanPath, err := validateAbsClean(path)
 	if err != nil {
 		return "", nil, err
@@ -174,15 +499,21 @@ func Prepare(ctx context.Context, path string, data []byte, opts *Options) (tmpP
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", nil, fmt.Errorf("atomic write: %w", ctxErr)
 	}
+	if symErr := checkSymlink(cleanPath, c); symErr != nil {
+		return "", nil, symErr
+	}
 	dir := filepath.Dir(cleanPath)
-	tmp, err := os.CreateTemp(dir, opts.pattern())
+	if mkErr := ensureDir(dir, c); mkErr != nil {
+		return "", nil, mkErr
+	}
+	tmp, err := os.CreateTemp(dir, c.tempPattern)
 	if err != nil {
 		return "", nil, &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
 	tmpName := tmp.Name()
 	doCleanup := func() {
 		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			slog.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
+			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
 		}
 	}
 	if _, err := tmp.Write(data); err != nil {
@@ -195,15 +526,18 @@ func Prepare(ctx context.Context, path string, data []byte, opts *Options) (tmpP
 		doCleanup()
 		return "", nil, fmt.Errorf("atomic write: %w", err)
 	}
-	if err := tmp.Chmod(0o644); err != nil {
+	mode := c.mode
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		doCleanup()
 		return "", nil, &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		doCleanup()
-		return "", nil, &WriteError{Phase: PhaseTempSync, Err: err}
+	if !c.noSync {
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			doCleanup()
+			return "", nil, &WriteError{Phase: PhaseTempSync, Err: err}
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		doCleanup()
@@ -214,71 +548,107 @@ func Prepare(ctx context.Context, path string, data []byte, opts *Options) (tmpP
 
 // Commit renames the prepared temp file to the final path and fsyncs
 // the parent directory.
-func Commit(tmpPath, finalPath string) error {
+func Commit(tmpPath, finalPath string, opts ...Option) error {
+	c := buildCfg(opts)
 	cleanFinal, err := validateAbsClean(finalPath)
 	if err != nil {
 		if rmErr := os.Remove(tmpPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			slog.Debug("atomic write: temp cleanup after path validation error", "path", tmpPath, "error", rmErr)
+			c.logger.Debug("atomic write: temp cleanup after path validation error", "path", tmpPath, "error", rmErr)
 		}
 		return err
 	}
 	if err := os.Rename(tmpPath, cleanFinal); err != nil {
 		if rmErr := os.Remove(tmpPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			slog.Debug("atomic write: temp cleanup after rename error", "path", tmpPath, "error", rmErr)
+			c.logger.Debug("atomic write: temp cleanup after rename error", "path", tmpPath, "error", rmErr)
 		}
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	fsyncDir(filepath.Dir(cleanFinal))
+	if !c.noSync {
+		fsyncDir(filepath.Dir(cleanFinal), c.logger)
+	}
 	return nil
 }
 
 // SaveBytes writes raw bytes to path atomically, creating parent
 // directories as needed. Directory permissions are 0755 for
 // world-readable files, 0700 for private-only files.
-func SaveBytes(path string, data []byte, perm os.FileMode, opts *Options) error {
-	dir := filepath.Dir(path)
+func SaveBytes(path string, data []byte, perm os.FileMode, opts ...Option) error {
+	c := buildCfg(opts)
+	cleanPath, err := validateAbsClean(path)
+	if err != nil {
+		return err
+	}
+	if symErr := checkSymlink(cleanPath, c); symErr != nil {
+		return symErr
+	}
+	dir := filepath.Dir(cleanPath)
 	dirPerm := os.FileMode(0o755)
 	if perm&0o077 == 0 {
 		dirPerm = 0o700
 	}
-	if err := os.MkdirAll(dir, dirPerm); err != nil {
-		return err
+	if mkErr := os.MkdirAll(dir, dirPerm); mkErr != nil {
+		return mkErr
 	}
-	tmpName, err := writeTempFile(dir, filepath.Base(path), data, perm, opts)
+	perm = resolveMode(cleanPath, perm, c)
+	tmpName, err := writeTempFile(dir, filepath.Base(cleanPath), data, perm, c)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := applyOwnership(tmpName, cleanPath, c); err != nil {
 		_ = os.Remove(tmpName)
 		return err
 	}
-	fsyncDir(dir)
+	if err := os.Rename(tmpName, cleanPath); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if !c.noSync {
+		fsyncDir(dir, c.logger)
+	}
 	return nil
 }
 
 // SaveJSON marshals v to indented JSON and writes it atomically.
 // mu must not be nil; it serializes concurrent writes to the same path.
-func SaveJSON(path string, mu *sync.Mutex, v any, label string, perm os.FileMode, opts *Options) error {
+// label identifies the caller in log output for diagnostics.
+func SaveJSON(path string, mu *sync.Mutex, v any, label string, perm os.FileMode, opts ...Option) error {
 	if mu == nil {
 		return errors.New("atomicfile.SaveJSON: nil mutex")
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	c := buildCfg(opts)
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		slog.Error("atomicfile.SaveJSON: marshal failed", "label", label, "error", err)
+		c.logger.Error("atomicfile.SaveJSON: marshal failed", "label", label, "error", err)
 		return err
 	}
-	if err := SaveBytes(path, data, perm, opts); err != nil {
-		slog.Error("atomicfile.SaveJSON: write failed", "label", label, "path", path, "error", err)
+	if len(data) > largeSaveJSONThreshold {
+		c.logger.Warn("atomicfile.SaveJSON: large payload",
+			"label", label, "bytes", len(data),
+			"threshold", largeSaveJSONThreshold)
+	}
+	if err := SaveBytes(path, data, perm, opts...); err != nil {
+		c.logger.Error("atomicfile.SaveJSON: write failed", "label", label, "path", path, "error", err)
 		return err
 	}
 	return nil
 }
 
+// LoadJSON reads a JSON file with size bounds and unmarshals into v.
+// Symmetric with SaveJSON. maxBytes limits the file size to prevent
+// unbounded memory allocation.
+func LoadJSON(ctx context.Context, path string, maxBytes int64, v any) error {
+	data, err := ReadBounded(ctx, path, maxBytes)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
 // ReadBounded opens a file, validates its size against maxBytes, and
 // reads it with a LimitReader. Returns ErrFileTooLarge if the file
-// exceeds the limit. Also detects if the file grew during the read.
+// exceeds the limit.
 func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, error) {
 	cleanPath, err := validateAbsClean(path)
 	if err != nil {
@@ -302,7 +672,7 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, ctxErr
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, saturateAdd(maxBytes, 1)))
 	if err != nil {
 		return nil, err
 	}
@@ -313,24 +683,24 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 }
 
 // fsyncDir best-effort fsyncs a directory for rename durability.
-func fsyncDir(dir string) {
+func fsyncDir(dir string, logger *slog.Logger) {
 	d, err := os.Open(dir)
 	if err != nil {
-		slog.Debug("atomicfile: parent dir open for fsync failed", "dir", dir, "error", err)
+		logger.Warn("atomicfile: parent dir open for fsync failed", "dir", dir, "error", err)
 		return
 	}
 	defer d.Close()
 	if err := d.Sync(); err != nil {
-		slog.Debug("atomicfile: parent dir fsync failed", "dir", dir, "error", err)
+		logger.Warn("atomicfile: parent dir fsync failed", "dir", dir, "error", err)
 	}
 }
 
 // writeTempFile creates a temp file in dir, writes data, fsyncs, closes,
 // and chmods. Returns the temp file name on success.
-func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Options) (tmpName string, retErr error) {
+func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, c *cfg) (tmpName string, retErr error) {
 	pattern := baseName + ".tmp-*"
-	if opts != nil && opts.TempPattern != "" {
-		pattern = opts.TempPattern
+	if c.tempPattern != DefaultTempPrefix {
+		pattern = c.tempPattern
 	}
 	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
@@ -346,9 +716,11 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Op
 		_ = tmp.Close()
 		return "", err
 	}
-	if err = tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return "", err
+	if !c.noSync {
+		if err = tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			return "", err
+		}
 	}
 	if err := tmp.Close(); err != nil {
 		return "", err
@@ -359,28 +731,34 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, opts *Op
 	return name, nil
 }
 
+// saturateAdd returns a + b clamped to math.MaxInt64 on overflow.
+func saturateAdd(a, b int64) int64 {
+	sum := a + b
+	if sum < a {
+		return math.MaxInt64
+	}
+	return sum
+}
+
 // isStaleTempName reports whether name matches temp file patterns.
 func isStaleTempName(name string) bool {
-	for _, tag := range [...]string{".tmp-", ".upload-", ".copy-"} {
-		i := strings.LastIndex(name, tag)
-		if i < 0 || i+len(tag) >= len(name) {
-			continue
-		}
-		tail := name[i+len(tag):]
-		if !strings.ContainsAny(tail, "./\\") {
-			return true
-		}
+	tag := ".tmp-"
+	i := strings.LastIndex(name, tag)
+	if i < 0 || i+len(tag) >= len(name) {
+		return false
 	}
-	return false
+	tail := name[i+len(tag):]
+	return !strings.ContainsAny(tail, "./\\")
 }
 
 // CleanupStaleTemps removes stale temp files in dir older than maxAge.
 // Best-effort; errors are logged but not returned.
-func CleanupStaleTemps(dir string, maxAge time.Duration) {
+func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
+	c := buildCfg(opts)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("atomicfile.CleanupStaleTemps: readdir failed", "dir", dir, "error", err)
+			c.logger.Warn("atomicfile.CleanupStaleTemps: readdir failed", "dir", dir, "error", err)
 		}
 		return
 	}
@@ -393,7 +771,7 @@ func CleanupStaleTemps(dir string, maxAge time.Duration) {
 		info, err := e.Info()
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				slog.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", err)
+				c.logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", err)
 			}
 			continue
 		}
@@ -402,9 +780,9 @@ func CleanupStaleTemps(dir string, maxAge time.Duration) {
 		}
 		full := filepath.Join(dir, name)
 		if err := os.Remove(full); err != nil {
-			slog.Warn("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", err)
+			c.logger.Warn("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", err)
 			continue
 		}
-		slog.Info("atomicfile.CleanupStaleTemps: removed stale temp", "path", full, "age", time.Since(info.ModTime()))
+		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temp", "path", full, "age", time.Since(info.ModTime()))
 	}
 }
