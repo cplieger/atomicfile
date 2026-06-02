@@ -8,6 +8,10 @@
 
 A standalone Go library providing atomic file writes (temp→fsync→rename→dir-fsync), path-traversal validation, bounded reads, streaming writes, and JSON helpers. Standard-library only, no external dependencies.
 
+## Platform Support
+
+**Linux only (including Docker/containers).** Windows is unsupported by design — `os.Rename` cannot guarantee atomicity on Windows ([golang/go#22397](https://github.com/golang/go/issues/22397#issuecomment-498856679)). macOS/BSD may work but is untested.
+
 ## Install
 
 `go get github.com/cplieger/atomicfile@latest`
