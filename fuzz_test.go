@@ -105,7 +105,7 @@ func FuzzValidateAbsClean(f *testing.F) {
 		if strings.Contains(clean, "\x00") {
 			t.Fatalf("returned path contains null byte: %q", clean)
 		}
-		for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		for seg := range strings.SplitSeq(clean, string(filepath.Separator)) {
 			if seg == ".." {
 				t.Fatalf("returned path contains '..' segment: %q", clean)
 			}
