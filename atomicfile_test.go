@@ -3,6 +3,7 @@ package atomicfile
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"os"
@@ -401,6 +402,33 @@ func TestCleanupStaleTemps(t *testing.T) {
 			t.Errorf("real temp not removed")
 		}
 	})
+
+	t.Run("removes_default_prefix_convention", func(t *testing.T) {
+		dir := t.TempDir()
+		// The convention WriteFile/WriteReader/Prepare/PendingFile emit.
+		stale := filepath.Join(dir, ".atomicfile-987654321.tmp")
+		if err := os.WriteFile(stale, []byte("partial"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		oldTime := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(stale, oldTime, oldTime); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+		// A recent default-prefix temp must be preserved.
+		recent := filepath.Join(dir, ".atomicfile-111222333.tmp")
+		if err := os.WriteFile(recent, []byte("new"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		CleanupStaleTemps(dir, time.Hour)
+
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Errorf("stale default-prefix temp not removed: stat err = %v", err)
+		}
+		if _, err := os.Stat(recent); err != nil {
+			t.Errorf("recent default-prefix temp wrongly removed: %v", err)
+		}
+	})
 }
 
 func TestIsStaleTempName(t *testing.T) {
@@ -415,6 +443,8 @@ func TestIsStaleTempName(t *testing.T) {
 		{"suffix contains slash", "foo.tmp-a/b", false},
 		{"nothing after suffix", "just.tmp-", false},
 		{"empty", "", false},
+		{"default prefix temp", ".atomicfile-987654321.tmp", true},
+		{"user dotfile not matched", ".atomicfilebackup.tmp", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -435,10 +465,14 @@ func TestValidateAbsClean(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects_traversal", func(t *testing.T) {
-		_, err := validateAbsClean("/foo/../etc/passwd")
+	t.Run("collapses_traversal_to_clean_absolute_path", func(t *testing.T) {
+		got, err := validateAbsClean("/foo/../etc/passwd")
 		if err != nil {
-			return
+			t.Fatalf("validateAbsClean(%q) = error %v, want nil (Clean removes \"..\")",
+				"/foo/../etc/passwd", err)
+		}
+		if got != "/etc/passwd" {
+			t.Errorf("validateAbsClean(%q) = %q, want %q", "/foo/../etc/passwd", got, "/etc/passwd")
 		}
 	})
 
@@ -1267,4 +1301,105 @@ func TestSymlinkTarget(t *testing.T) {
 			t.Fatal("expected error for symlink target")
 		}
 	})
+}
+
+func TestWritePhase_String(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		want  string
+		phase WritePhase
+	}{
+		{"create", "create temp file", PhaseTempCreate},
+		{"write", "write temp file", PhaseTempWrite},
+		{"chmod", "chmod temp file", PhaseTempChmod},
+		{"sync", "sync temp file", PhaseTempSync},
+		{"close", "close temp file", PhaseTempClose},
+		{"rename", "rename to final path", PhaseRename},
+		{"chown", "chown temp file", PhaseChown},
+		{"dirsync", "fsync parent directory", PhaseDirSync},
+		{"zero_is_unknown", "unknown phase", WritePhase(0)},
+		{"out_of_range_is_unknown", "unknown phase", WritePhase(99)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.phase.String(); got != tt.want {
+				t.Errorf("WritePhase(%d).String() = %q, want %q", int(tt.phase), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteFile_RenameFailure_ReportsRenamePhase(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "iam-a-dir")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	err := WriteFile(context.Background(), target, []byte("data"))
+	if err == nil {
+		t.Fatal("WriteFile(dir target) = nil, want error")
+	}
+	var we *WriteError
+	if !errors.As(err, &we) {
+		t.Fatalf("error = %T, want *WriteError", err)
+	}
+	if we.Phase != PhaseRename {
+		t.Errorf("WriteError.Phase = %v, want PhaseRename", we.Phase)
+	}
+}
+
+func TestWriteError_Unwrap_PreservesChain(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("underlying io failure")
+	we := &WriteError{Phase: PhaseTempWrite, Err: sentinel}
+	if !errors.Is(we, sentinel) {
+		t.Errorf("errors.Is(WriteError, sentinel) = false, want true")
+	}
+	if got := we.Unwrap(); got != sentinel {
+		t.Errorf("WriteError.Unwrap() = %v, want %v", got, sentinel)
+	}
+}
+
+func TestWriteError_Error_FormatsPhasePrefix(t *testing.T) {
+	t.Parallel()
+	we := &WriteError{Phase: PhaseRename, Err: errors.New("disk gone")}
+	got := we.Error()
+	want := "rename to final path: disk gone"
+	if got != want {
+		t.Errorf("WriteError.Error() = %q, want %q", got, want)
+	}
+}
+
+func TestCommit_SymlinkFinalPath_RefusesAndCleansTemp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.txt")
+	if err := os.WriteFile(real, []byte("orig"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	plain := filepath.Join(dir, "plain.txt")
+	tmpPath, cleanup, err := Prepare(context.Background(), plain, []byte("payload"), WithNoSync())
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	defer cleanup()
+
+	err = Commit(tmpPath, link, WithNoSync())
+	if !errors.Is(err, ErrSymlinkTarget) {
+		t.Fatalf("Commit(symlink finalPath) = %v, want ErrSymlinkTarget", err)
+	}
+	if _, statErr := os.Stat(tmpPath); !os.IsNotExist(statErr) {
+		t.Errorf("temp file not cleaned after symlink refusal: stat err = %v", statErr)
+	}
+	got, _ := os.ReadFile(real)
+	if string(got) != "orig" {
+		t.Errorf("symlink target overwritten: got %q, want %q", got, "orig")
+	}
 }

@@ -113,7 +113,16 @@ All write functions accept variadic `Option` values to customize behavior. Omit 
 
 ## Durability Guarantees
 
-Every atomic write follows the sequence: create temp file → write data → fsync temp → close → rename to final path → fsync parent directory. This ensures that after a crash, the file contains either the complete old content or the complete new content — never a partial write. The directory fsync is best-effort and ensures the rename is durable even if the system loses power immediately after the call returns.
+Every atomic write follows the sequence: create temp file → write data → fsync temp → close → rename to final path → fsync parent directory. This ensures that after a crash, the file contains either the complete old content or the complete new content — never a partial write. The directory fsync makes the rename durable even if the system loses power immediately after the call returns.
+
+If the parent-directory fsync fails (for example an `EIO` from a failing disk), the write returns a `*WriteError` with `Phase: PhaseDirSync`. The rename has already completed at that point, so the new content is present at the final path, but its durability across an immediate crash is not guaranteed. Callers that require strict durability should treat a `PhaseDirSync` error as actionable (retry or alert); callers that only need atomicity can ignore it or use `WithNoSync()` to skip the directory fsync entirely.
+
+> **Note on auto-created directories.** When `WithMkdirMode` (or `SaveBytes`'s
+> implicit `MkdirAll`) creates new parent directories, only the file's immediate
+> parent is fsynced. The newly created intermediate directories are not fsynced
+> into their own parents, so the durability guarantee above applies only when the
+> full parent path already exists. If you need durability into a freshly created
+> directory tree, create and fsync the directories before writing.
 
 ## Symlink Safety
 

@@ -37,19 +37,24 @@ func FuzzIsStaleTempName(f *testing.F) {
 			}
 		}
 
-		// If true, verify structural invariants.
+		// If true, verify structural invariants for whichever convention matched.
 		if got {
-			tag := ".tmp-"
-			i := strings.LastIndex(name, tag)
-			if i < 0 {
-				t.Fatal("true but no .tmp- tag")
-			}
-			tail := name[i+len(tag):]
-			if len(tail) == 0 {
-				t.Fatal("true but empty tail")
-			}
-			if strings.ContainsAny(tail, "./\\") {
-				t.Fatal("true but tail has forbidden chars")
+			pre, suf, _ := strings.Cut(DefaultTempPrefix, "*")
+			defaultStyle := len(name) > len(pre)+len(suf) &&
+				strings.HasPrefix(name, pre) && strings.HasSuffix(name, suf)
+			if !defaultStyle {
+				tag := ".tmp-"
+				i := strings.LastIndex(name, tag)
+				if i < 0 {
+					t.Fatal("true but no recognized temp signature")
+				}
+				tail := name[i+len(tag):]
+				if len(tail) == 0 {
+					t.Fatal("true but empty tail")
+				}
+				if strings.ContainsAny(tail, "./\\") {
+					t.Fatal("true but tail has forbidden chars")
+				}
 			}
 		}
 	})
@@ -200,6 +205,7 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 
 func FuzzCleanupStaleTemps(f *testing.F) {
 	f.Add("data.json.tmp-abc123\nregular.json\nfoo.tmp-xyz", uint(60))
+	f.Add(".atomicfile-987654321.tmp\n.atomicfilebackup.tmp\nkeep.json", uint(60))
 
 	f.Fuzz(func(t *testing.T, fileNames string, maxAgeSec uint) {
 		if maxAgeSec > 86400*365 {

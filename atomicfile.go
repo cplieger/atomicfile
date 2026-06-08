@@ -89,6 +89,10 @@ func WithPreserveMode() Option {
 // WithPreserveOwnership stats the target file before writing and
 // chowns the temp file to match the target's uid/gid.
 // Requires CAP_CHOWN or root. No-op if target doesn't exist.
+// Best-effort: the chown is applied after the temp-file fsync, so unlike
+// file content and mode it is not covered by the durability barrier; a
+// crash immediately after a successful write may leave the file with the
+// writing process's ownership.
 func WithPreserveOwnership() Option {
 	return func(c *cfg) { c.preserveOwnership = true }
 }
@@ -101,6 +105,11 @@ func WithNoSync() Option {
 
 // WithAllowSymlinkTarget permits writing to a path that is currently
 // a symlink. By default, symlink targets are refused with ErrSymlinkTarget.
+//
+// Note: the atomic rename REPLACES the symlink with a regular file; it
+// does not follow the link to write through to its target. If you intend
+// to update the file the symlink points to, resolve it yourself with
+// filepath.EvalSymlinks before calling.
 func WithAllowSymlinkTarget() Option {
 	return func(c *cfg) { c.allowSymlinkTarget = true }
 }
@@ -123,6 +132,12 @@ func buildCfg(opts []Option) *cfg {
 
 // checkSymlink returns ErrSymlinkTarget if target is a symlink and
 // AllowSymlinkTarget is not set.
+//
+// checkSymlink is best-effort: the Lstat precedes the eventual
+// os.Rename, so an attacker who can write the parent directory may
+// create a symlink after the check. Because os.Rename does not follow
+// the final component, the worst case is replacing the attacker's
+// symlink rather than writing through it.
 func checkSymlink(target string, c *cfg) error {
 	if c.allowSymlinkTarget {
 		return nil
@@ -176,6 +191,11 @@ const (
 	PhaseRename
 	// PhaseChown indicates failure changing ownership of the temp file.
 	PhaseChown
+	// PhaseDirSync indicates failure fsyncing the parent directory after a
+	// successful rename. The new content is already at the final path, but
+	// durability across a crash is not guaranteed until the directory entry
+	// reaches stable storage.
+	PhaseDirSync
 )
 
 func (p WritePhase) String() string {
@@ -194,6 +214,8 @@ func (p WritePhase) String() string {
 		return "rename to final path"
 	case PhaseChown:
 		return "chown temp file"
+	case PhaseDirSync:
+		return "fsync parent directory"
 	default:
 		return "unknown phase"
 	}
@@ -245,6 +267,14 @@ func ensureDir(dir string, c *cfg) error {
 	return nil
 }
 
+// removeTemp deletes a temp file best-effort, logging at Debug when
+// removal fails for a reason other than the file already being gone.
+func removeTemp(tmpName string, logger *slog.Logger) {
+	if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
+	}
+}
+
 // WriteFile writes data to path atomically. Mode defaults to 0o644;
 // override with WithMode. Additional behavior configured via opts.
 func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) error {
@@ -269,11 +299,7 @@ func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) er
 		return &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
 	tmpName := tmp.Name()
-	cleanup := func() {
-		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
-		}
-	}
+	cleanup := func() { removeTemp(tmpName, c.logger) }
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		cleanup()
@@ -313,8 +339,8 @@ func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) er
 		cleanup()
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	if !c.noSync {
-		fsyncDir(dir, c.logger)
+	if err := commitDirSync(dir, c.noSync); err != nil {
+		return err
 	}
 	return nil
 }
@@ -343,11 +369,12 @@ func WriteReader(ctx context.Context, path string, r io.Reader, mode os.FileMode
 		return &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
 	tmpName := tmp.Name()
-	cleanup := func() {
-		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
+	committed := false
+	defer func() {
+		if !committed {
+			removeTemp(tmpName, c.logger)
 		}
-	}
+	}()
 	var writeErr error
 	if wt, ok := r.(io.WriterTo); ok {
 		_, writeErr = wt.WriteTo(tmp)
@@ -356,40 +383,38 @@ func WriteReader(ctx context.Context, path string, r io.Reader, mode os.FileMode
 	}
 	if writeErr != nil {
 		tmp.Close()
-		cleanup()
 		return &WriteError{Phase: PhaseTempWrite, Err: writeErr}
 	}
 	if err := ctx.Err(); err != nil {
 		tmp.Close()
-		cleanup()
 		return fmt.Errorf("atomic write: %w", err)
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
-		cleanup()
 		return &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
 	if !c.noSync {
 		if err := tmp.Sync(); err != nil {
 			tmp.Close()
-			cleanup()
 			return &WriteError{Phase: PhaseTempSync, Err: err}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("atomic write: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
-		cleanup()
 		return &WriteError{Phase: PhaseTempClose, Err: err}
 	}
 	if err := applyOwnership(tmpName, cleanPath, c); err != nil {
-		cleanup()
 		return err
 	}
 	if err := os.Rename(tmpName, cleanPath); err != nil {
-		cleanup()
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	if !c.noSync {
-		fsyncDir(dir, c.logger)
+	committed = true
+	if err := commitDirSync(dir, c.noSync); err != nil {
+		return err
 	}
 	return nil
 }
@@ -448,30 +473,30 @@ func (p *PendingFile) CommitFile() error {
 	tmpName := p.Name()
 	if err := p.Chmod(p.mode); err != nil {
 		p.Close()
-		os.Remove(tmpName)
+		removeTemp(tmpName, p.logger)
 		return &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
 	if !p.cfg.noSync {
 		if err := p.Sync(); err != nil {
 			p.Close()
-			os.Remove(tmpName)
+			removeTemp(tmpName, p.logger)
 			return &WriteError{Phase: PhaseTempSync, Err: err}
 		}
 	}
 	if err := p.Close(); err != nil {
-		os.Remove(tmpName)
+		removeTemp(tmpName, p.logger)
 		return &WriteError{Phase: PhaseTempClose, Err: err}
 	}
 	if err := applyOwnership(tmpName, p.path, p.cfg); err != nil {
-		os.Remove(tmpName)
+		removeTemp(tmpName, p.logger)
 		return err
 	}
 	if err := os.Rename(tmpName, p.path); err != nil {
-		os.Remove(tmpName)
+		removeTemp(tmpName, p.logger)
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	if !p.cfg.noSync {
-		fsyncDir(p.dir, p.logger)
+	if err := commitDirSync(p.dir, p.cfg.noSync); err != nil {
+		return err
 	}
 	return nil
 }
@@ -485,7 +510,10 @@ func (p *PendingFile) Cleanup() error {
 	p.done = true
 	tmpName := p.Name()
 	p.Close()
-	return os.Remove(tmpName)
+	if err := os.Remove(tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Prepare creates a temp file with data written, synced, and closed —
@@ -511,11 +539,7 @@ func Prepare(ctx context.Context, path string, data []byte, opts ...Option) (tmp
 		return "", nil, &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
 	tmpName := tmp.Name()
-	doCleanup := func() {
-		if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-			c.logger.Debug("atomic write: temp file cleanup failed", "path", tmpName, "error", rmErr)
-		}
-	}
+	doCleanup := func() { removeTemp(tmpName, c.logger) }
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		doCleanup()
@@ -526,7 +550,7 @@ func Prepare(ctx context.Context, path string, data []byte, opts ...Option) (tmp
 		doCleanup()
 		return "", nil, fmt.Errorf("atomic write: %w", err)
 	}
-	mode := c.mode
+	mode := resolveMode(cleanPath, c.mode, c)
 	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		doCleanup()
@@ -539,15 +563,27 @@ func Prepare(ctx context.Context, path string, data []byte, opts ...Option) (tmp
 			return "", nil, &WriteError{Phase: PhaseTempSync, Err: err}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		tmp.Close()
+		doCleanup()
+		return "", nil, fmt.Errorf("atomic write: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		doCleanup()
 		return "", nil, &WriteError{Phase: PhaseTempClose, Err: err}
+	}
+	if ownErr := applyOwnership(tmpName, cleanPath, c); ownErr != nil {
+		doCleanup()
+		return "", nil, ownErr
 	}
 	return tmpName, doCleanup, nil
 }
 
 // Commit renames the prepared temp file to the final path and fsyncs
-// the parent directory.
+// the parent directory. Pass the SAME options (notably WithNoSync)
+// that were given to Prepare: the durability barrier spans both calls,
+// and a mismatch (e.g. WithNoSync on Commit but not Prepare) drops the
+// parent-dir fsync that makes the rename durable.
 func Commit(tmpPath, finalPath string, opts ...Option) error {
 	c := buildCfg(opts)
 	cleanFinal, err := validateAbsClean(finalPath)
@@ -557,14 +593,20 @@ func Commit(tmpPath, finalPath string, opts ...Option) error {
 		}
 		return err
 	}
+	if symErr := checkSymlink(cleanFinal, c); symErr != nil {
+		if rmErr := os.Remove(tmpPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			c.logger.Debug("atomic write: temp cleanup after symlink refusal", "path", tmpPath, "error", rmErr)
+		}
+		return symErr
+	}
 	if err := os.Rename(tmpPath, cleanFinal); err != nil {
 		if rmErr := os.Remove(tmpPath); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			c.logger.Debug("atomic write: temp cleanup after rename error", "path", tmpPath, "error", rmErr)
 		}
 		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	if !c.noSync {
-		fsyncDir(filepath.Dir(cleanFinal), c.logger)
+	if err := commitDirSync(filepath.Dir(cleanFinal), c.noSync); err != nil {
+		return err
 	}
 	return nil
 }
@@ -586,6 +628,9 @@ func SaveBytes(path string, data []byte, perm os.FileMode, opts ...Option) error
 	if perm&0o077 == 0 {
 		dirPerm = 0o700
 	}
+	if c.mkdirMode != 0 {
+		dirPerm = c.mkdirMode
+	}
 	if mkErr := os.MkdirAll(dir, dirPerm); mkErr != nil {
 		return mkErr
 	}
@@ -595,15 +640,15 @@ func SaveBytes(path string, data []byte, perm os.FileMode, opts ...Option) error
 		return err
 	}
 	if err := applyOwnership(tmpName, cleanPath, c); err != nil {
-		_ = os.Remove(tmpName)
+		removeTemp(tmpName, c.logger)
 		return err
 	}
 	if err := os.Rename(tmpName, cleanPath); err != nil {
-		_ = os.Remove(tmpName)
-		return err
+		removeTemp(tmpName, c.logger)
+		return &WriteError{Phase: PhaseRename, Err: err}
 	}
-	if !c.noSync {
-		fsyncDir(dir, c.logger)
+	if err := commitDirSync(dir, c.noSync); err != nil {
+		return err
 	}
 	return nil
 }
@@ -629,7 +674,12 @@ func SaveJSON(path string, mu *sync.Mutex, v any, label string, perm os.FileMode
 			"threshold", largeSaveJSONThreshold)
 	}
 	if err := SaveBytes(path, data, perm, opts...); err != nil {
-		c.logger.Error("atomicfile.SaveJSON: write failed", "label", label, "path", path, "error", err)
+		if we, ok := errors.AsType[*WriteError](err); ok && we.Phase == PhaseDirSync {
+			c.logger.Warn("atomicfile.SaveJSON: written but parent-dir fsync failed (durability not guaranteed)",
+				"label", label, "path", path, "error", err)
+		} else {
+			c.logger.Error("atomicfile.SaveJSON: write failed", "label", label, "path", path, "error", err)
+		}
 		return err
 	}
 	return nil
@@ -682,17 +732,37 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 	return data, nil
 }
 
-// fsyncDir best-effort fsyncs a directory for rename durability.
-func fsyncDir(dir string, logger *slog.Logger) {
+// fsyncDir fsyncs a directory to make a prior rename durable across a crash.
+// The parent-directory fsync is the step that guarantees the renamed entry
+// survives power loss, so its failure is returned to the caller (wrapped as
+// PhaseDirSync) rather than swallowed. The rename has already succeeded when
+// this runs, so a non-nil return means "written but durability not
+// guaranteed", not "write failed".
+//
+// It is a package var so tests can inject a directory-fsync failure; a real
+// fsync(2) on a directory fd is impractical to force on a healthy filesystem.
+// Production code never reassigns it.
+var fsyncDir = func(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
-		logger.Warn("atomicfile: parent dir open for fsync failed", "dir", dir, "error", err)
-		return
+		return err
 	}
 	defer d.Close()
-	if err := d.Sync(); err != nil {
-		logger.Warn("atomicfile: parent dir fsync failed", "dir", dir, "error", err)
+	return d.Sync()
+}
+
+// commitDirSync makes a completed rename durable by fsyncing its parent
+// directory, unless noSync is set. A failure is wrapped as PhaseDirSync; the
+// rename has already succeeded, so the new content is at the final path even
+// when this returns an error.
+func commitDirSync(dir string, noSync bool) error {
+	if noSync {
+		return nil
 	}
+	if err := fsyncDir(dir); err != nil {
+		return &WriteError{Phase: PhaseDirSync, Err: err}
+	}
+	return nil
 }
 
 // writeTempFile creates a temp file in dir, writes data, fsyncs, closes,
@@ -716,6 +786,10 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, c *cfg) 
 		_ = tmp.Close()
 		return "", err
 	}
+	if err = tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
 	if !c.noSync {
 		if err = tmp.Sync(); err != nil {
 			_ = tmp.Close()
@@ -723,9 +797,6 @@ func writeTempFile(dir, baseName string, data []byte, perm os.FileMode, c *cfg) 
 		}
 	}
 	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(name, perm); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -740,29 +811,45 @@ func saturateAdd(a, b int64) int64 {
 	return sum
 }
 
-// isStaleTempName reports whether name matches temp file patterns.
+// isStaleTempName reports whether name matches either temp-naming
+// convention this package emits: the SaveBytes/SaveJSON style
+// "<base>.tmp-<random>", and the default CreateTemp pattern
+// DefaultTempPrefix (".atomicfile-<random>.tmp") used by WriteFile,
+// WriteReader, Prepare, and PendingFile.
 func isStaleTempName(name string) bool {
 	tag := ".tmp-"
-	i := strings.LastIndex(name, tag)
-	if i < 0 || i+len(tag) >= len(name) {
-		return false
+	if i := strings.LastIndex(name, tag); i >= 0 && i+len(tag) < len(name) {
+		tail := name[i+len(tag):]
+		if !strings.ContainsAny(tail, "./\\") {
+			return true
+		}
 	}
-	tail := name[i+len(tag):]
-	return !strings.ContainsAny(tail, "./\\")
+	if pre, suf, ok := strings.Cut(DefaultTempPrefix, "*"); ok &&
+		len(name) > len(pre)+len(suf) &&
+		strings.HasPrefix(name, pre) && strings.HasSuffix(name, suf) {
+		return true
+	}
+	return false
 }
 
 // CleanupStaleTemps removes stale temp files in dir older than maxAge.
-// Best-effort; errors are logged but not returned.
+// It recognizes only the two built-in temp-naming conventions
+// (DefaultTempPrefix ".atomicfile-*.tmp" and "<base>.tmp-<random>").
+// Temp files created with a custom WithTempPattern are NOT reclaimed,
+// even if the same option is passed here. Best-effort; errors are
+// logged but not returned.
 func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
 	c := buildCfg(opts)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			c.logger.Warn("atomicfile.CleanupStaleTemps: readdir failed", "dir", dir, "error", err)
 		}
 		return
 	}
 	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	failed := 0
 	for _, e := range entries {
 		name := e.Name()
 		if !isStaleTempName(name) {
@@ -770,7 +857,7 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
 		}
 		info, err := e.Info()
 		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
+			if !errors.Is(err, fs.ErrNotExist) {
 				c.logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", err)
 			}
 			continue
@@ -780,9 +867,19 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
 		}
 		full := filepath.Join(dir, name)
 		if err := os.Remove(full); err != nil {
-			c.logger.Warn("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", err)
+			if !errors.Is(err, fs.ErrNotExist) {
+				c.logger.Debug("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", err)
+				failed++
+			}
 			continue
 		}
-		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temp", "path", full, "age", time.Since(info.ModTime()))
+		c.logger.Debug("atomicfile.CleanupStaleTemps: removed stale temp", "path", full, "age", time.Since(info.ModTime()))
+		removed++
+	}
+	if removed > 0 {
+		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temps", "dir", dir, "count", removed)
+	}
+	if failed > 0 {
+		c.logger.Warn("atomicfile.CleanupStaleTemps: some stale temps could not be removed", "dir", dir, "failed", failed)
 	}
 }
