@@ -14,8 +14,8 @@ import (
 
 // errReader is an io.Reader that returns an error after n bytes.
 type errReader struct {
-	n   int
 	err error
+	n   int
 }
 
 func (r *errReader) Read(p []byte) (int, error) {
