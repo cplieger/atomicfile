@@ -431,25 +431,50 @@ func TestCleanupStaleTemps(t *testing.T) {
 	})
 }
 
+func TestCleanupStaleTemps_CustomPattern(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	oldTime := time.Now().Add(-2 * time.Hour)
+	custom := filepath.Join(dir, ".myapp-abc123.tmp")
+	if err := os.WriteFile(custom, []byte("x"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_ = os.Chtimes(custom, oldTime, oldTime)
+
+	// Without the matching option, a custom-pattern temp is NOT reclaimed.
+	CleanupStaleTemps(dir, time.Hour)
+	if _, err := os.Stat(custom); err != nil {
+		t.Fatalf("custom temp reclaimed without WithTempPattern: %v", err)
+	}
+	// With the same WithTempPattern used for writes, it IS reclaimed.
+	CleanupStaleTemps(dir, time.Hour, WithTempPattern(".myapp-*.tmp"))
+	if _, err := os.Stat(custom); !os.IsNotExist(err) {
+		t.Errorf("custom temp not reclaimed with WithTempPattern")
+	}
+}
+
 func TestIsStaleTempName(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
-		want bool
+		name    string
+		in      string
+		pattern string
+		want    bool
 	}{
-		{"basic temp", "data.json.tmp-abc123", true},
-		{"no signature", "regular.json", false},
-		{"suffix contains dot", "alice.tmp-2024-notes.json", false},
-		{"suffix contains slash", "foo.tmp-a/b", false},
-		{"nothing after suffix", "just.tmp-", false},
-		{"empty", "", false},
-		{"default prefix temp", ".atomicfile-987654321.tmp", true},
-		{"user dotfile not matched", ".atomicfilebackup.tmp", false},
+		{"basic temp", "data.json.tmp-abc123", "", true},
+		{"no signature", "regular.json", "", false},
+		{"suffix contains dot", "alice.tmp-2024-notes.json", "", false},
+		{"suffix contains slash", "foo.tmp-a/b", "", false},
+		{"nothing after suffix", "just.tmp-", "", false},
+		{"empty", "", "", false},
+		{"default prefix temp", ".atomicfile-987654321.tmp", "", true},
+		{"user dotfile not matched", ".atomicfilebackup.tmp", "", false},
+		{"custom pattern matched with opt", ".myapp-xyz.tmp", ".myapp-*.tmp", true},
+		{"custom pattern ignored without opt", ".myapp-xyz.tmp", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isStaleTempName(tt.in); got != tt.want {
-				t.Errorf("isStaleTempName(%q) = %v, want %v", tt.in, got, tt.want)
+			if got := isStaleTempName(tt.in, tt.pattern); got != tt.want {
+				t.Errorf("isStaleTempName(%q,%q) = %v, want %v", tt.in, tt.pattern, got, tt.want)
 			}
 		})
 	}

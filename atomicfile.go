@@ -816,7 +816,7 @@ func saturateAdd(a, b int64) int64 {
 // "<base>.tmp-<random>", and the default CreateTemp pattern
 // DefaultTempPrefix (".atomicfile-<random>.tmp") used by WriteFile,
 // WriteReader, Prepare, and PendingFile.
-func isStaleTempName(name string) bool {
+func isStaleTempName(name, tempPattern string) bool {
 	tag := ".tmp-"
 	if i := strings.LastIndex(name, tag); i >= 0 && i+len(tag) < len(name) {
 		tail := name[i+len(tag):]
@@ -824,19 +824,35 @@ func isStaleTempName(name string) bool {
 			return true
 		}
 	}
-	if pre, suf, ok := strings.Cut(DefaultTempPrefix, "*"); ok &&
-		len(name) > len(pre)+len(suf) &&
-		strings.HasPrefix(name, pre) && strings.HasSuffix(name, suf) {
+	if matchesCreateTempPattern(name, DefaultTempPrefix) {
+		return true
+	}
+	if tempPattern != "" && tempPattern != DefaultTempPrefix &&
+		matchesCreateTempPattern(name, tempPattern) {
 		return true
 	}
 	return false
 }
 
-// CleanupStaleTemps removes stale temp files in dir older than maxAge.
-// It recognizes only the two built-in temp-naming conventions
-// (DefaultTempPrefix ".atomicfile-*.tmp" and "<base>.tmp-<random>").
-// Temp files created with a custom WithTempPattern are NOT reclaimed,
-// even if the same option is passed here. Best-effort; errors are
+// matchesCreateTempPattern reports whether name could be an os.CreateTemp
+// result for pattern: the random string replaces the last '*' (or is appended
+// when pattern has no '*'). A non-empty random middle is required, so a real
+// file named exactly prefix+suffix is never mistaken for a temp.
+func matchesCreateTempPattern(name, pattern string) bool {
+	i := strings.LastIndex(pattern, "*")
+	if i < 0 {
+		return len(name) > len(pattern) && strings.HasPrefix(name, pattern)
+	}
+	pre, suf := pattern[:i], pattern[i+1:]
+	return len(name) > len(pre)+len(suf) &&
+		strings.HasPrefix(name, pre) && strings.HasSuffix(name, suf)
+}
+
+// CleanupStaleTemps removes stale temp files in dir older than maxAge. It
+// recognizes the two built-in temp-naming conventions (DefaultTempPrefix
+// ".atomicfile-*.tmp" and "<base>.tmp-<random>") and, when a WithTempPattern
+// option is passed, that custom pattern too — pass the same WithTempPattern you
+// use for writes so its orphaned temps are reclaimed. Best-effort; errors are
 // logged but not returned.
 func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
 	c := buildCfg(opts)
@@ -852,7 +868,7 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) {
 	failed := 0
 	for _, e := range entries {
 		name := e.Name()
-		if !isStaleTempName(name) {
+		if !isStaleTempName(name, c.tempPattern) {
 			continue
 		}
 		info, err := e.Info()
