@@ -94,7 +94,7 @@ func main() {
 
 ### Utilities
 
-- `CleanupStaleTemps(dir, maxAge, opts ...Option)` — remove old temp files
+- `CleanupStaleTemps(dir, maxAge, opts ...Option)` — remove stale temp files left by interrupted writes; recognizes both built-in temp schemes and, when a `WithTempPattern` option is passed, that custom pattern too (pass the same one you write with)
 
 ## Functional Options
 

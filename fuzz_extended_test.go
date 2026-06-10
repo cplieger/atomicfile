@@ -23,7 +23,7 @@ func FuzzIsStaleTempName(f *testing.F) {
 	f.Add("a.tmp-\x00")
 
 	f.Fuzz(func(t *testing.T, name string) {
-		got := isStaleTempName(name)
+		got := isStaleTempName(name, "")
 
 		// Cross-check against known fixtures.
 		switch name {
@@ -262,7 +262,7 @@ func FuzzCleanupStaleTemps(f *testing.F) {
 
 		for name := range preSet {
 			removed := !postSet[name]
-			isStale := isStaleTempName(name)
+			isStale := isStaleTempName(name, "")
 			if removed && !isStale {
 				t.Fatalf("non-stale file %q was removed", name)
 			}
