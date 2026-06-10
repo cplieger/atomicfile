@@ -1,0 +1,153 @@
+# Contributing to atomicfile
+
+Notes on the durability model, public API, and the test suite that guards
+them. The crash-safety guarantees are the whole point of the library, so
+most of this guide is about not breaking them when you add or change code.
+
+## What the library guarantees
+
+`atomicfile` is a standard-library-only Go package for crash-safe file
+writes. Every durable write follows the same six-step sequence, and that
+ordering is the load-bearing invariant of the package:
+
+1. create a temp file in the **target directory** (same mount, so the
+   rename is atomic),
+2. write the data,
+3. `Chmod` to the resolved mode,
+4. `fsync` the temp file,
+5. `close` then `os.Rename` to the final path,
+6. `fsync` the parent directory.
+
+After a crash the final path holds either the complete old content or the
+complete new content — never a partial write. Step 6 is what makes the
+rename itself survive power loss; skipping it (via `WithNoSync()`) keeps
+atomicity but drops durability.
+
+When you touch any write path (`WriteFile`, `WriteReader`, `Prepare` /
+`Commit`, `SaveBytes`, `SaveJSON`, `NewPendingFile` / `CommitFile`),
+preserve this ordering. In particular:
+
+- The temp file is always created in `filepath.Dir(cleanPath)`, never in
+  `os.TempDir()` — a cross-mount rename is not atomic.
+- Every failure returns a `*WriteError` tagged with the `WritePhase` that
+  failed (`PhaseTempCreate`, `PhaseRename`, `PhaseDirSync`, ...). Keep new
+  failure points tagged so callers can distinguish "write failed" from
+  `PhaseDirSync` ("written, but durability not guaranteed").
+- On any error before the rename, the temp file must be cleaned up
+  (`removeTemp`). Don't leave orphans.
+- Paths are validated by `validateAbsClean` (absolute, no `..` traversal,
+  no null bytes) before any filesystem work.
+
+The platform target is **Linux only** — `os.Rename` is not guaranteed
+atomic on Windows. Don't add Windows-specific rename code; see the
+"Unsupported by Design" table in `README.md` for the full list of
+deliberate non-features.
+
+## The `fsyncDir` test seam
+
+The parent-directory fsync (step 6) is impossible to fail on a healthy
+filesystem, so `fsyncDir` is a package-level `var` that tests reassign to
+inject an `EIO`-style failure (see `dirsync_test.go`'s `stubFsyncDir`).
+
+- Production code must never reassign `fsyncDir`.
+- Tests that stub it mutate package state, so they must **not** call
+  `t.Parallel()` and must restore the original via `t.Cleanup`.
+
+## Local development
+
+The module targets the Go version pinned in `go.mod` (currently
+`go 1.26.4`; the code uses `errors.AsType`, a 1.26 generic). Use that
+toolchain or newer.
+
+```sh
+go build ./...
+go test ./...
+go test -race ./...
+```
+
+Run a single benchmark set with `go test -bench=. -benchmem .`.
+
+### Linting and formatting
+
+Lint config lives in `.golangci.yaml` (golangci-lint v2). It enables
+`gosec`, `gocritic`, `revive`, `gocyclo` (complexity cap 18), `sloglint`
+(kv-only), and others. Formatting is `gofumpt` with `extra-rules` plus
+`gci` import grouping (standard → third-party); `golangci-lint run` reports
+unformatted files as issues, so format before pushing.
+
+```sh
+golangci-lint run
+golangci-lint fmt
+```
+
+### Fuzzing
+
+The package ships nine fuzz targets across `fuzz_test.go` and
+`fuzz_extended_test.go`. Run one at a time with a time budget:
+
+```sh
+go test -run='^$' -fuzz=FuzzWriteFile -fuzztime=30s .
+```
+
+Available targets:
+
+- `FuzzWriteFile`, `FuzzWriteReader`, `FuzzReadBounded`,
+  `FuzzValidateAbsClean` (`fuzz_test.go`)
+- `FuzzCommit`, `FuzzSaveJSON`, `FuzzPendingFileRoundTrip`,
+  `FuzzCleanupStaleTemps`, `FuzzIsStaleTempName` (`fuzz_extended_test.go`)
+
+New parsing or path-handling logic should come with a fuzz target or an
+added seed corpus entry.
+
+### Mutation testing
+
+`.gremlins.yaml` configures [Gremlins](https://gremlins.dev) mutation
+testing (synced fleet-wide from `cplieger/ci`). The weekly central runner
+tracks the efficacy score; you can run it locally to check that new tests
+actually kill mutants:
+
+```sh
+gremlins unleash .
+```
+
+## Test suite conventions
+
+Tests live beside the code (standard Go layout) but split by intent — match
+the right file when adding cases:
+
+- `atomicfile_test.go` — core table-driven unit tests.
+- `atomicfile_prop_test.go` — property tests via `pgregory.net/rapid` (the
+  one external dependency, test-only).
+- `fuzz_test.go`, `fuzz_extended_test.go` — fuzz targets (see above).
+- `adversarial_test.go`, `redteam_refactor_test.go`, `round3_test.go` —
+  failure-injection and edge-case hardening (erroring readers, temp-cleanup
+  races, symlink refusal).
+- `convergence_test.go`, `niloption_test.go` — guards for variadic
+  `Option` handling, including `nil` options interleaved with real ones
+  (`buildCfg` skips nils, and the suite enforces it).
+- `dirsync_test.go` — `PhaseDirSync` propagation through every durable
+  entry point via the `fsyncDir` seam.
+- `example_test.go`, `readme_example_test.go` — runnable `Example`
+  functions and the README snippet, kept compiling.
+- `benchmark_test.go` — allocation/throughput benchmarks.
+
+When you add an `Option` or a new entry point, extend the convergence and
+dir-sync suites so the nil-option guard and `PhaseDirSync` propagation stay
+covered for the new surface.
+
+## Commits and PRs
+
+Branch from `main`, keep changes focused with tests, and open a PR. This
+account uses [Conventional Commits](https://www.conventionalcommits.org/)
+parsed by git-cliff (`cliff.toml`) to build release notes, so the commit
+type drives the version bump: `feat:`, `fix:`, `sec:`, and
+`chore:`/`docs:`/`refactor:`/`test:` (no release). Write the subject as the
+changelog line a consumer would read.
+
+## Conduct & security
+
+By participating you agree to the org-wide
+[Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
+Report security issues through the
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+never in a public issue.
