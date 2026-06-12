@@ -67,9 +67,8 @@ Both seams follow the same rules:
 
 ## Local development
 
-The module targets the Go version pinned in `go.mod` (currently
-`go 1.26.4`; the code uses `errors.AsType`, a 1.26 generic). Use that
-toolchain or newer.
+The module targets the Go version pinned in `go.mod` (the code uses
+`errors.AsType`, a 1.26 generic). Use that toolchain or newer.
 
 ```sh
 go build ./...
@@ -82,7 +81,7 @@ Run a single benchmark set with `go test -bench=. -benchmem .`.
 ### Linting and formatting
 
 Lint config lives in `.golangci.yaml` (golangci-lint v2). It enables
-`gosec`, `gocritic`, `revive`, `gocyclo` (complexity cap 18), `sloglint`
+`gosec`, `gocritic`, `revive`, `gocyclo`, `sloglint`
 (kv-only), and others. Formatting is `gofumpt` with `extra-rules` plus
 `gci` import grouping (standard → third-party); `golangci-lint run` reports
 unformatted files as issues, so format before pushing.
@@ -94,7 +93,7 @@ golangci-lint fmt
 
 ### Fuzzing
 
-The package ships seven fuzz targets across `fuzz_test.go` and
+The package ships several fuzz targets across `fuzz_test.go` and
 `fuzz_extended_test.go`. Run one at a time with a time budget:
 
 ```sh
