@@ -29,9 +29,12 @@ func FuzzWriteFile(f *testing.F) {
 		}
 		path := filepath.Join(baseDir, base)
 
-		err := WriteFile(ctx, path, content)
+		res, err := WriteFile(ctx, path, content)
 		if err != nil {
 			return
+		}
+		if res.Path != path {
+			t.Fatalf("Result.Path = %q, want %q", res.Path, path)
 		}
 
 		real, err := filepath.EvalSymlinks(path)
@@ -74,7 +77,7 @@ func FuzzReadBounded(f *testing.F) {
 			if maxBytes < int64(len(content)) && errors.Is(err, ErrFileTooLarge) {
 				return
 			}
-			// Other errors (e.g. path validation) are acceptable, panics are not.
+			// Other errors (e.g. path validation) are acceptable; panics are not.
 			return
 		}
 		if int64(len(got)) > maxBytes {
@@ -124,8 +127,7 @@ func FuzzWriteReader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, content []byte) {
 		path := filepath.Join(baseDir, "fuzz_writer.dat")
 
-		err := WriteReader(ctx, path, bytes.NewReader(content), 0o644)
-		if err != nil {
+		if _, err := WriteReader(ctx, path, bytes.NewReader(content)); err != nil {
 			return
 		}
 
@@ -137,13 +139,13 @@ func FuzzWriteReader(f *testing.F) {
 			t.Fatalf("content mismatch: got %d bytes, want %d", len(got), len(content))
 		}
 
-		// Check no temp file leaks
+		// No temp file may leak after a successful write.
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
 			t.Fatalf("ReadDir: %v", err)
 		}
 		for _, e := range entries {
-			if strings.Contains(e.Name(), ".atomicfile-") && strings.HasSuffix(e.Name(), ".tmp") {
+			if strings.HasPrefix(e.Name(), tempPrefix) && strings.HasSuffix(e.Name(), tempSuffix) {
 				t.Fatalf("temp file leaked: %s", e.Name())
 			}
 		}

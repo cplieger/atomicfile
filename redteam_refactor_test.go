@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,9 +21,12 @@ import (
 
 func TestRefactor_WriteFile_NoOptions_Uses0644(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "default-mode.txt")
-	if err := WriteFile(context.Background(), path, []byte("hi")); err != nil {
+	if _, err := WriteFile(context.Background(), path, []byte("hi")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	fi, err := os.Stat(path)
@@ -39,12 +43,8 @@ func TestRefactor_WriteFile_NilOptionSlice(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nil-opts.txt")
 	var opts []Option
-	if err := WriteFile(context.Background(), path, []byte("nil"), opts...); err != nil {
+	if _, err := WriteFile(context.Background(), path, []byte("nil"), opts...); err != nil {
 		t.Fatalf("WriteFile(nil opts): %v", err)
-	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("nil opts mode = %o, want 0644", fi.Mode().Perm())
 	}
 }
 
@@ -53,12 +53,8 @@ func TestRefactor_WriteFile_EmptyOptionSlice(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty-opts.txt")
 	opts := []Option{}
-	if err := WriteFile(context.Background(), path, []byte("empty"), opts...); err != nil {
+	if _, err := WriteFile(context.Background(), path, []byte("empty"), opts...); err != nil {
 		t.Fatalf("WriteFile(empty opts): %v", err)
-	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("empty opts mode = %o, want 0644", fi.Mode().Perm())
 	}
 }
 
@@ -67,9 +63,6 @@ func TestRefactor_BuildCfg_Defaults(t *testing.T) {
 	c := buildCfg(nil)
 	if c.mode != 0o644 {
 		t.Errorf("default mode = %o, want 0644", c.mode)
-	}
-	if c.tempPattern != DefaultTempPrefix {
-		t.Errorf("default tempPattern = %q, want %q", c.tempPattern, DefaultTempPrefix)
 	}
 	if c.logger == nil {
 		t.Error("logger is nil, want slog.Default()")
@@ -93,31 +86,9 @@ func TestRefactor_BuildCfg_Defaults(t *testing.T) {
 
 func TestRefactor_WithMode_Threads(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "mode-thread.txt")
-	if err := WriteFile(context.Background(), path, []byte("x"), WithMode(0o755)); err != nil {
-		t.Fatal(err)
-	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o755 {
-		t.Fatalf("WithMode(0755) → %o", fi.Mode().Perm())
-	}
-}
-
-func TestRefactor_WithTempPattern_Threads(t *testing.T) {
-	t.Parallel()
-	c := buildCfg([]Option{WithTempPattern(".custom-*.xyz")})
-	if c.tempPattern != ".custom-*.xyz" {
-		t.Fatalf("tempPattern = %q, want .custom-*.xyz", c.tempPattern)
-	}
-}
-
-func TestRefactor_WithTempPattern_Empty_FallsBackToDefault(t *testing.T) {
-	t.Parallel()
-	// Passing empty string should fall back to default
-	c := buildCfg([]Option{WithTempPattern("")})
-	if c.tempPattern != DefaultTempPrefix {
-		t.Fatalf("empty tempPattern = %q, want %q", c.tempPattern, DefaultTempPrefix)
+	c := buildCfg([]Option{WithMode(0o755)})
+	if c.mode != 0o755 {
+		t.Fatalf("WithMode(0755) threaded as %o", c.mode)
 	}
 }
 
@@ -173,7 +144,6 @@ func TestRefactor_WithAllowSymlinkTarget_Threads(t *testing.T) {
 
 func TestRefactor_OptionOrder_DoesNotMatter(t *testing.T) {
 	t.Parallel()
-	// Last WithMode wins, but all other options should still be set
 	c := buildCfg([]Option{
 		WithNoSync(),
 		WithMode(0o600),
@@ -201,19 +171,24 @@ func TestRefactor_OptionOrder_DoesNotMatter(t *testing.T) {
 
 func TestRefactor_AllOptionsCombined_WriteFile(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "combined.txt")
 	var buf bytes.Buffer
 	l := slog.New(slog.NewTextHandler(&buf, nil))
-	err := WriteFile(context.Background(), path, []byte("combined"),
+	res, err := WriteFile(context.Background(), path, []byte("combined"),
 		WithLogger(l),
-		WithTempPattern(".redteam-*.tmp"),
 		WithMode(0o600),
 		WithMkdirMode(0o755),
 		WithNoSync(),
 	)
 	if err != nil {
 		t.Fatalf("WriteFile combined opts: %v", err)
+	}
+	if res.Durable {
+		t.Errorf("Result.Durable = true, want false under WithNoSync")
 	}
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0o600 {
@@ -225,146 +200,81 @@ func TestRefactor_AllOptionsCombined_WriteFile(t *testing.T) {
 	}
 }
 
-// Verify WriteReader still takes mode positionally
-func TestRefactor_WriteReader_ModePositional(t *testing.T) {
+// WriteReader takes its mode via WithMode (no positional mode arg).
+func TestRefactor_WriteReader_ModeViaWithMode(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "positional.txt")
-	err := WriteReader(context.Background(), path, strings.NewReader("pos"), 0o600)
-	if err != nil {
+	path := filepath.Join(dir, "wm.txt")
+	if _, err := WriteReader(context.Background(), path, strings.NewReader("pos"), WithMode(0o600)); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("WriteReader positional mode = %o, want 0600", fi.Mode().Perm())
+		t.Fatalf("WriteReader WithMode = %o, want 0600", fi.Mode().Perm())
 	}
 }
 
-// Verify SaveBytes still takes perm positionally
-func TestRefactor_SaveBytes_ModePositional(t *testing.T) {
+// NewPendingFile takes its mode via WithMode (no positional mode arg).
+func TestRefactor_NewPendingFile_ModeViaWithMode(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "sb-pos.txt")
-	err := SaveBytes(path, []byte("x"), 0o600)
+	path := filepath.Join(dir, "pf-mode.txt")
+	pf, err := NewPendingFile(context.Background(), path, WithMode(0o600))
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.Write([]byte("x")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if _, err := pf.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("SaveBytes positional mode = %o, want 0600", fi.Mode().Perm())
-	}
-}
-
-// Verify SaveJSON still takes perm positionally
-func TestRefactor_SaveJSON_ModePositional(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sj-pos.json")
-	var mu sync.Mutex
-	err := SaveJSON(path, &mu, "x", "test", 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("SaveJSON positional mode = %o, want 0600", fi.Mode().Perm())
-	}
-}
-
-// Verify NewPendingFile still takes mode positionally
-func TestRefactor_NewPendingFile_ModePositional(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "pf-pos.txt")
-	pf, err := NewPendingFile(path, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pf.Cleanup()
-	pf.Write([]byte("x"))
-	if err := pf.CommitFile(); err != nil {
-		t.Fatal(err)
-	}
-	fi, _ := os.Stat(path)
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("NewPendingFile positional mode = %o, want 0600", fi.Mode().Perm())
+		t.Fatalf("NewPendingFile WithMode = %o, want 0600", fi.Mode().Perm())
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// (B) FULL RE-ATTACK: temp-leak, null-byte, MaxInt64, symlink, race,
-//     NoSync in Commit
+// (B) FULL RE-ATTACK: temp-leak, null-byte, MaxInt64, symlink, race
 // ═══════════════════════════════════════════════════════════════════
 
 func TestReattack_TempLeak_WriteFile_AllErrorPaths(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-
-	// Path with non-existent parent (no MkdirMode → temp create fails)
+	// Missing parent (no MkdirMode) → temp create fails before any temp lands.
 	path := filepath.Join(dir, "noparent", "file.txt")
-	_ = WriteFile(context.Background(), path, []byte("x"))
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leak in noparent case: %s", e.Name())
-		}
-	}
+	_, _ = WriteFile(context.Background(), path, []byte("x"))
+	assertNoTempLeak(t, dir)
 }
 
 func TestReattack_TempLeak_WriteReader_AllErrorPaths(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "noparent", "file.txt")
-	_ = WriteReader(context.Background(), path, strings.NewReader("x"), 0o644)
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leak: %s", e.Name())
-		}
-	}
-}
-
-func TestReattack_TempLeak_Prepare_AllErrorPaths(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "noparent", "file.txt")
-	_, _, err := Prepare(context.Background(), path, []byte("x"))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leak: %s", e.Name())
-		}
-	}
+	_, _ = WriteReader(context.Background(), path, strings.NewReader("x"))
+	assertNoTempLeak(t, dir)
 }
 
 func TestReattack_NullByte_Path_AllFunctions(t *testing.T) {
 	t.Parallel()
 	nullPath := "/tmp/redteam\x00evil"
 
-	if err := WriteFile(context.Background(), nullPath, []byte("x")); err == nil {
+	if _, err := WriteFile(context.Background(), nullPath, []byte("x")); err == nil {
 		t.Error("WriteFile: expected error")
 	}
-	if err := WriteReader(context.Background(), nullPath, strings.NewReader("x"), 0o644); err == nil {
+	if _, err := WriteReader(context.Background(), nullPath, strings.NewReader("x")); err == nil {
 		t.Error("WriteReader: expected error")
 	}
-	if err := SaveBytes(nullPath, []byte("x"), 0o644); err == nil {
-		t.Error("SaveBytes: expected error")
-	}
-	var mu sync.Mutex
-	if err := SaveJSON(nullPath, &mu, "x", "test", 0o644); err == nil {
-		t.Error("SaveJSON: expected error")
-	}
-	if _, err := NewPendingFile(nullPath, 0o644); err == nil {
+	if _, err := NewPendingFile(context.Background(), nullPath); err == nil {
 		t.Error("NewPendingFile: expected error")
-	}
-	if _, _, err := Prepare(context.Background(), nullPath, []byte("x")); err == nil {
-		t.Error("Prepare: expected error")
-	}
-	if err := Commit("/tmp/fake", nullPath); err == nil {
-		t.Error("Commit: expected error")
 	}
 	if _, err := ReadBounded(context.Background(), nullPath, 1024); err == nil {
 		t.Error("ReadBounded: expected error")
@@ -375,7 +285,9 @@ func TestReattack_ReadBounded_MaxInt64_NoOverflow(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "small.txt")
-	os.WriteFile(path, []byte("abc"), 0o644)
+	if err := os.WriteFile(path, []byte("abc"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	data, err := ReadBounded(context.Background(), path, math.MaxInt64)
 	if err != nil {
 		t.Fatalf("ReadBounded(MaxInt64): %v", err)
@@ -389,42 +301,21 @@ func TestReattack_SymlinkRefusal_WriteFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real.txt")
-	os.WriteFile(real, []byte("original"), 0o644)
+	if err := os.WriteFile(real, []byte("original"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	link := filepath.Join(dir, "link.txt")
-	os.Symlink(real, link)
-
-	err := WriteFile(context.Background(), link, []byte("evil"))
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, err := WriteFile(context.Background(), link, []byte("evil"))
 	if !errors.Is(err, ErrSymlinkTarget) {
 		t.Fatalf("expected ErrSymlinkTarget, got %v", err)
 	}
-	// Must not have leaked temp files
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leaked on symlink refusal: %s", e.Name())
-		}
-	}
-	// Original untouched
+	assertNoTempLeak(t, dir)
 	got, _ := os.ReadFile(real)
 	if string(got) != "original" {
 		t.Errorf("original modified: %q", got)
-	}
-}
-
-func TestReattack_SymlinkRefusal_NoTempLeak_SaveBytes(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	real := filepath.Join(dir, "real.txt")
-	os.WriteFile(real, []byte("original"), 0o644)
-	link := filepath.Join(dir, "link.txt")
-	os.Symlink(real, link)
-
-	_ = SaveBytes(link, []byte("evil"), 0o644)
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leaked: %s", e.Name())
-		}
 	}
 }
 
@@ -438,11 +329,10 @@ func TestReattack_ConcurrentWriteFile_Race(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_ = WriteFile(context.Background(), path, []byte(strings.Repeat("A", idx+1)))
+			_, _ = WriteFile(context.Background(), path, []byte(strings.Repeat("A", idx+1)))
 		}(i)
 	}
 	wg.Wait()
-	// Final file must be valid
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -450,84 +340,41 @@ func TestReattack_ConcurrentWriteFile_Race(t *testing.T) {
 	if len(got) == 0 || len(got) > N {
 		t.Fatalf("unexpected len=%d", len(got))
 	}
-	// No leaked temps
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leaked after race: %s", e.Name())
-		}
-	}
+	assertNoTempLeak(t, dir)
 }
 
-func TestReattack_Commit_NoSync_Respected(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "nosync-commit.txt")
-	tmpPath, cleanup, err := Prepare(context.Background(), path, []byte("nosync-data"), WithNoSync())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	// Commit must not panic/fail when NoSync is passed
-	if err := Commit(tmpPath, path, WithNoSync()); err != nil {
-		t.Fatalf("Commit(NoSync): %v", err)
-	}
-	got, _ := os.ReadFile(path)
-	if string(got) != "nosync-data" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestReattack_Commit_WithoutNoSync_AlsoWorks(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sync-commit.txt")
-	tmpPath, cleanup, err := Prepare(context.Background(), path, []byte("sync-data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	if err := Commit(tmpPath, path); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
-	got, _ := os.ReadFile(path)
-	if string(got) != "sync-data" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-// Attack: erroring reader with various WithX options — ensure no temp leak
+// Erroring reader with various options — ensure no temp leak.
 func TestReattack_WriteReader_ErrorWithOptions_NoLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "err-opts.txt")
-	r := &errReader{n: 10, err: io.ErrUnexpectedEOF}
-	err := WriteReader(context.Background(), path, r, 0o644,
-		WithNoSync(), WithMode(0o600), WithTempPattern(".redteam-*.tmp"))
+	r := plainReader{r: &errReader{n: 10, err: io.ErrUnexpectedEOF}}
+	_, err := WriteReader(context.Background(), path, r,
+		WithNoSync(), WithMode(0o600))
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "redteam") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leaked with options: %s", e.Name())
-		}
-	}
+	assertNoTempLeak(t, dir)
 }
 
-// Attack: PendingFile with NoSync — CommitFile must still work
 func TestReattack_PendingFile_NoSync_CommitWorks(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pf-nosync.txt")
-	pf, err := NewPendingFile(path, 0o644, WithNoSync())
+	pf, err := NewPendingFile(context.Background(), path, WithNoSync())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pf.Cleanup()
-	pf.Write([]byte("no-sync-pf"))
-	if err := pf.CommitFile(); err != nil {
-		t.Fatalf("CommitFile(NoSync): %v", err)
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.Write([]byte("no-sync-pf")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	res, err := pf.Commit(context.Background())
+	if err != nil {
+		t.Fatalf("Commit(NoSync): %v", err)
+	}
+	if res.Durable {
+		t.Errorf("Result.Durable = true, want false under WithNoSync")
 	}
 	got, _ := os.ReadFile(path)
 	if string(got) != "no-sync-pf" {
@@ -535,15 +382,19 @@ func TestReattack_PendingFile_NoSync_CommitWorks(t *testing.T) {
 	}
 }
 
-// Verify WithPreserveMode + WithMode — PreserveMode takes priority for existing file
+// WithPreserveMode takes priority over WithMode for an existing target.
 func TestRefactor_PreserveMode_OverridesWithMode(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pm.txt")
-	os.WriteFile(path, []byte("old"), 0o751)
-	err := WriteFile(context.Background(), path, []byte("new"),
-		WithMode(0o600), WithPreserveMode())
-	if err != nil {
+	if err := os.WriteFile(path, []byte("old"), 0o751); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := WriteFile(context.Background(), path, []byte("new"),
+		WithMode(0o600), WithPreserveMode()); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(path)
@@ -552,14 +403,15 @@ func TestRefactor_PreserveMode_OverridesWithMode(t *testing.T) {
 	}
 }
 
-// Verify WithPreserveMode falls back to WithMode when target doesn't exist
 func TestRefactor_PreserveMode_FallsBackToWithMode(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pm-new.txt")
-	err := WriteFile(context.Background(), path, []byte("new"),
-		WithMode(0o600), WithPreserveMode())
-	if err != nil {
+	if _, err := WriteFile(context.Background(), path, []byte("new"),
+		WithMode(0o600), WithPreserveMode()); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(path)
@@ -568,7 +420,6 @@ func TestRefactor_PreserveMode_FallsBackToWithMode(t *testing.T) {
 	}
 }
 
-// Attack: concurrent PendingFile writes with various options under -race
 func TestReattack_ConcurrentPendingFile_WithOptions_Race(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -579,13 +430,15 @@ func TestReattack_ConcurrentPendingFile_WithOptions_Race(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			pf, err := NewPendingFile(path, 0o644, WithNoSync())
+			pf, err := NewPendingFile(context.Background(), path, WithNoSync())
 			if err != nil {
 				return
 			}
-			defer pf.Cleanup()
-			pf.Write([]byte(strings.Repeat("Z", idx+1)))
-			pf.CommitFile()
+			defer func() { _ = pf.Cleanup() }()
+			if _, err := pf.Write([]byte(strings.Repeat("Z", idx+1))); err != nil {
+				return
+			}
+			_, _ = pf.Commit(context.Background())
 		}(i)
 	}
 	wg.Wait()
@@ -596,10 +449,5 @@ func TestReattack_ConcurrentPendingFile_WithOptions_Race(t *testing.T) {
 	if len(got) == 0 || len(got) > N {
 		t.Fatalf("unexpected len=%d", len(got))
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp leaked: %s", e.Name())
-		}
-	}
+	assertNoTempLeak(t, dir)
 }

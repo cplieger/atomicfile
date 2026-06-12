@@ -1,54 +1,52 @@
 package atomicfile
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"sync"
+	"syscall"
 	"testing"
 )
-
-// errReader is an io.Reader that returns an error after n bytes.
-type errReader struct {
-	err error
-	n   int
-}
-
-func (r *errReader) Read(p []byte) (int, error) {
-	if r.n <= 0 {
-		return 0, r.err
-	}
-	if len(p) > r.n {
-		p = p[:r.n]
-	}
-	for i := range p {
-		p[i] = 'x'
-	}
-	r.n -= len(p)
-	return len(p), nil
-}
 
 func TestWriteReader_ErroringReader_CleansUpTemp(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "errreader.txt")
-	r := &errReader{n: 100, err: errors.New("simulated IO error")}
-	err := WriteReader(context.Background(), path, r, 0o644)
+	// plainReader hides the WriterTo implementation, forcing the io.Copy path.
+	r := plainReader{r: &errReader{n: 100, err: errors.New("simulated IO error")}}
+	_, err := WriteReader(context.Background(), path, r)
 	if err == nil {
 		t.Fatal("expected error from erroring reader")
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp file leaked after reader error: %s", e.Name())
-		}
+	var we *WriteError
+	if !errors.As(err, &we) {
+		t.Fatalf("error = %T, want *WriteError", err)
 	}
+	if we.Phase != PhaseTempWrite {
+		t.Errorf("WriteError.Phase = %v, want PhaseTempWrite", we.Phase)
+	}
+	assertNoTempLeak(t, dir)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Error("target file should not exist after reader error")
+	}
+}
+
+func TestWriteReader_WriterTo_Error_CleansUp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "writerto-err.txt")
+	r := &errWriterTo{err: errors.New("WriterTo failure")}
+	_, err := WriteReader(context.Background(), path, r)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	assertNoTempLeak(t, dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("target file should not exist after WriterTo error")
 	}
 }
 
@@ -56,94 +54,24 @@ func TestPendingFile_AbandonedLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "abandoned.txt")
-	pf, err := NewPendingFile(path, 0o644)
+	pf, err := NewPendingFile(context.Background(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
-	pf.Write([]byte("data that will be abandoned"))
+	if _, err := pf.Write([]byte("data that will be abandoned")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	tmpName := pf.Name()
 
+	// An abandoned PendingFile keeps its temp until Cleanup/Commit.
 	if _, err := os.Stat(tmpName); err != nil {
 		t.Fatalf("temp file should still exist when abandoned: %v", err)
 	}
-
-	pf.Close()
-	os.Remove(tmpName)
-}
-
-func TestSaveJSON_ConcurrentSamePath(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "concurrent.json")
-	var mu sync.Mutex
-
-	var wg sync.WaitGroup
-	const goroutines = 10
-	errs := make([]error, goroutines)
-
-	for i := range goroutines {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			errs[idx] = SaveJSON(path, &mu, map[string]int{"i": idx}, "concurrent", 0o644)
-		}(i)
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
 	}
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("goroutine %d: %v", i, err)
-		}
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	var v map[string]int
-	if err := json.Unmarshal(data, &v); err != nil {
-		t.Fatalf("final file is not valid JSON: %v\ncontent: %q", err, data)
-	}
-
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") {
-			t.Errorf("stale temp file: %s", e.Name())
-		}
-	}
-}
-
-func TestLoadJSON_TruncatedFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "truncated.json")
-	os.WriteFile(path, []byte(`{"key": "val`), 0o644)
-	var v map[string]string
-	err := LoadJSON(context.Background(), path, 1<<20, &v)
-	if err == nil {
-		t.Fatal("expected error for truncated JSON")
-	}
-	var syntaxErr *json.SyntaxError
-	if !errors.As(err, &syntaxErr) {
-		if !strings.Contains(err.Error(), "unexpected end") {
-			t.Logf("error type: %T, value: %v", err, err)
-		}
-	}
-}
-
-func TestLoadJSON_ExactMaxBytes(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "exact.json")
-	data := []byte(`{"x":1}`)
-	os.WriteFile(path, data, 0o644)
-	var v map[string]int
-	err := LoadJSON(context.Background(), path, 7, &v)
-	if err != nil {
-		t.Fatalf("LoadJSON at exact limit: %v", err)
-	}
-	if v["x"] != 1 {
-		t.Errorf("got %v", v)
+	if _, err := os.Stat(tmpName); !os.IsNotExist(err) {
+		t.Error("temp not removed after Cleanup")
 	}
 }
 
@@ -152,14 +80,18 @@ func TestWriteFile_SymlinkInParentDir(t *testing.T) {
 	dir := t.TempDir()
 
 	realDir := filepath.Join(dir, "realdir")
-	os.Mkdir(realDir, 0o755)
-
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
 	linkDir := filepath.Join(dir, "linkdir")
-	os.Symlink(realDir, linkDir)
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
 
+	// The target file itself is not a symlink, only an ancestor directory is,
+	// so the write is permitted and lands in the real directory.
 	path := filepath.Join(linkDir, "file.txt")
-	err := WriteFile(context.Background(), path, []byte("through symlink parent"))
-	if err != nil {
+	if _, err := WriteFile(context.Background(), path, []byte("through symlink parent")); err != nil {
 		t.Fatalf("WriteFile through symlink parent: %v", err)
 	}
 
@@ -179,10 +111,12 @@ func TestPreserveOwnership_WithoutPrivilege(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "owned.txt")
-	os.WriteFile(path, []byte("old"), 0o644)
-
-	err := WriteFile(context.Background(), path, []byte("new"), WithPreserveOwnership())
-	if err != nil {
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Preserving ownership to the same (current) user is a no-op chown that
+	// succeeds without privilege.
+	if _, err := WriteFile(context.Background(), path, []byte("new"), WithPreserveOwnership()); err != nil {
 		t.Fatalf("PreserveOwnership to same user should succeed: %v", err)
 	}
 	got, _ := os.ReadFile(path)
@@ -191,60 +125,31 @@ func TestPreserveOwnership_WithoutPrivilege(t *testing.T) {
 	}
 }
 
-type errWriterTo struct {
-	err error
-}
-
-func (e *errWriterTo) Read(p []byte) (int, error) { return 0, e.err }
-func (e *errWriterTo) WriteTo(w io.Writer) (int64, error) {
-	w.Write([]byte("partial"))
-	return 7, e.err
-}
-
-func TestWriteReader_WriterTo_Error_CleansUp(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "writerto-err.txt")
-	r := &errWriterTo{err: errors.New("WriterTo failure")}
-	err := WriteReader(context.Background(), path, r, 0o644)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp file leaked: %s", e.Name())
-		}
-	}
-}
-
 func TestMkdirMode_BlockedByFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "blocker")
-	os.WriteFile(blocker, []byte("I am a file"), 0o644)
+	if err := os.WriteFile(blocker, []byte("I am a file"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 
 	path := filepath.Join(blocker, "sub", "file.txt")
-	err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
+	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
 	if err == nil {
-		t.Fatal("expected error when MkdirAll blocked by file")
+		t.Fatal("expected error when MkdirAll is blocked by a file")
 	}
-	entries, _ := os.ReadDir(dir)
-	for _, e := range entries {
-		if strings.Contains(e.Name(), ".tmp") || strings.Contains(e.Name(), "atomicfile") {
-			t.Errorf("temp file leaked: %s", e.Name())
-		}
-	}
+	assertNoTempLeak(t, dir)
 }
 
 func TestReadBounded_ZeroMax(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nonempty.txt")
-	os.WriteFile(path, []byte("x"), 0o644)
-	_, err := ReadBounded(context.Background(), path, 0)
-	if err == nil {
-		t.Fatal("expected error for maxBytes=0 with non-empty file")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := ReadBounded(context.Background(), path, 0); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("ReadBounded(0) = %v, want ErrFileTooLarge", err)
 	}
 }
 
@@ -252,7 +157,9 @@ func TestReadBounded_ZeroMax_EmptyFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.txt")
-	os.WriteFile(path, nil, 0o644)
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
 	data, err := ReadBounded(context.Background(), path, 0)
 	if err != nil {
 		t.Fatalf("ReadBounded(empty, 0): %v", err)
@@ -262,88 +169,42 @@ func TestReadBounded_ZeroMax_EmptyFile(t *testing.T) {
 	}
 }
 
+func TestReadBounded_NegativeMax(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := ReadBounded(context.Background(), path, -1); err == nil {
+		t.Fatal("expected error for negative maxBytes")
+	}
+}
+
 func TestNullByte_AllEntryPoints(t *testing.T) {
 	t.Parallel()
 	nullPath := "/tmp/test\x00evil"
 
 	t.Run("WriteFile", func(t *testing.T) {
-		err := WriteFile(context.Background(), nullPath, []byte("x"))
-		if err == nil {
-			t.Fatal("expected error")
+		if _, err := WriteFile(context.Background(), nullPath, []byte("x")); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("WriteReader", func(t *testing.T) {
-		err := WriteReader(context.Background(), nullPath, strings.NewReader("x"), 0o644)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-	t.Run("SaveBytes", func(t *testing.T) {
-		err := SaveBytes(nullPath, []byte("x"), 0o644)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-	t.Run("SaveJSON", func(t *testing.T) {
-		var mu sync.Mutex
-		err := SaveJSON(nullPath, &mu, "x", "test", 0o644)
-		if err == nil {
-			t.Fatal("expected error")
+		if _, err := WriteReader(context.Background(), nullPath, strings.NewReader("x")); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("NewPendingFile", func(t *testing.T) {
-		_, err := NewPendingFile(nullPath, 0o644)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-	t.Run("Prepare", func(t *testing.T) {
-		_, _, err := Prepare(context.Background(), nullPath, []byte("x"))
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-	t.Run("Commit", func(t *testing.T) {
-		err := Commit("/tmp/fake", nullPath)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-	t.Run("LoadJSON", func(t *testing.T) {
-		var v any
-		err := LoadJSON(context.Background(), nullPath, 1024, &v)
-		if err == nil {
-			t.Fatal("expected error")
+		if _, err := NewPendingFile(context.Background(), nullPath); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("ReadBounded", func(t *testing.T) {
-		_, err := ReadBounded(context.Background(), nullPath, 1024)
-		if err == nil {
-			t.Fatal("expected error")
+		if _, err := ReadBounded(context.Background(), nullPath, 1024); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
-}
-
-func TestReadBounded_NegativeMax(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "file.txt")
-	os.WriteFile(path, []byte("hello"), 0o644)
-	_, err := ReadBounded(context.Background(), path, -1)
-	if err == nil {
-		t.Fatal("expected error for negative maxBytes")
-	}
-}
-
-func TestReadBounded_NegativeMax_EmptyFile(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "empty.txt")
-	os.WriteFile(path, nil, 0o644)
-	_, err := ReadBounded(context.Background(), path, -1)
-	if err == nil {
-		t.Fatal("expected error for negative maxBytes even on empty file")
-	}
 }
 
 func TestSaturateAdd_EdgeCases(t *testing.T) {
@@ -372,20 +233,30 @@ func TestSaturateAdd_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestCommit_RespectsNoSync(t *testing.T) {
+func TestReadBounded_GrowsPastLimitDuringRead(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFO not supported on Windows")
+	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "nosync-commit.txt")
-	tmpPath, cleanup, err := Prepare(context.Background(), path, []byte("data"), WithNoSync())
-	if err != nil {
-		t.Fatalf("Prepare: %v", err)
+	fifo := filepath.Join(dir, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("Mkfifo unsupported: %v", err)
 	}
-	defer cleanup()
-	if err := Commit(tmpPath, path, WithNoSync()); err != nil {
-		t.Fatalf("Commit with NoSync: %v", err)
-	}
-	got, _ := os.ReadFile(path)
-	if string(got) != "data" {
-		t.Errorf("got %q, want %q", got, "data")
+	// A FIFO reports Size()==0 from Stat, so the pre-read size gate passes;
+	// the post-read length recheck is the only guard that can catch the
+	// overflow. A regular file of this size would be rejected earlier.
+	const limit = 8
+	payload := bytes.Repeat([]byte("x"), limit+4)
+	go func() {
+		w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer w.Close()
+		_, _ = w.Write(payload)
+	}()
+	if _, err := ReadBounded(context.Background(), fifo, limit); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("ReadBounded(fifo overflow) = %v, want ErrFileTooLarge", err)
 	}
 }

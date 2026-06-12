@@ -23,16 +23,21 @@ complete new content — never a partial write. Step 6 is what makes the
 rename itself survive power loss; skipping it (via `WithNoSync()`) keeps
 atomicity but drops durability.
 
-When you touch any write path (`WriteFile`, `WriteReader`, `Prepare` /
-`Commit`, `SaveBytes`, `SaveJSON`, `NewPendingFile` / `CommitFile`),
-preserve this ordering. In particular:
+When you touch any write path (`WriteFile`, `WriteReader`,
+`NewPendingFile` / `Commit`), preserve this ordering. In particular:
 
 - The temp file is always created in `filepath.Dir(cleanPath)`, never in
   `os.TempDir()` — a cross-mount rename is not atomic.
-- Every failure returns a `*WriteError` tagged with the `WritePhase` that
-  failed (`PhaseTempCreate`, `PhaseRename`, `PhaseDirSync`, ...). Keep new
-  failure points tagged so callers can distinguish "write failed" from
-  `PhaseDirSync` ("written, but durability not guaranteed").
+- A hard failure returns a `*WriteError` tagged with the `WritePhase` that
+  failed (`PhaseTempCreate`, `PhaseTempWrite`, `PhaseRename`, ...), and a
+  `*WriteError` always means the data did NOT reach its final path. Keep new
+  hard-failure points tagged. The parent-directory fsync (step 6) is the
+  exception: once the rename succeeds the data is present, so a failed dir
+  fsync is **not** a `*WriteError` — it returns a nil error with
+  `Result.Durable == false` and a `Warn` log. The "written, but durability
+  not guaranteed" state is now a `Result` flag, not a phase. Likewise a
+  preserve-ownership chown failure is best-effort — it logs at `Warn` and lets
+  the write proceed, so it carries no phase and is not a `*WriteError`.
 - On any error before the rename, the temp file must be cleaned up
   (`removeTemp`). Don't leave orphans.
 - Paths are validated by `validateAbsClean` (absolute, no `..` traversal,
@@ -43,14 +48,21 @@ atomic on Windows. Don't add Windows-specific rename code; see the
 "Unsupported by Design" table in `README.md` for the full list of
 deliberate non-features.
 
-## The `fsyncDir` test seam
+## The `fsyncDir` and `osChown` test seams
 
 The parent-directory fsync (step 6) is impossible to fail on a healthy
 filesystem, so `fsyncDir` is a package-level `var` that tests reassign to
 inject an `EIO`-style failure (see `dirsync_test.go`'s `stubFsyncDir`).
 
-- Production code must never reassign `fsyncDir`.
-- Tests that stub it mutate package state, so they must **not** call
+A best-effort `osChown` (used by `WithPreserveOwnership`) is impractical to
+fail from a same-owner test, so it is likewise a package-level `var` that
+tests reassign to inject a chown failure (see `stubOsChown` in
+`helpers_test.go`).
+
+Both seams follow the same rules:
+
+- Production code must never reassign `fsyncDir` or `osChown`.
+- Tests that stub either one mutate package state, so they must **not** call
   `t.Parallel()` and must restore the original via `t.Cleanup`.
 
 ## Local development
@@ -82,7 +94,7 @@ golangci-lint fmt
 
 ### Fuzzing
 
-The package ships nine fuzz targets across `fuzz_test.go` and
+The package ships seven fuzz targets across `fuzz_test.go` and
 `fuzz_extended_test.go`. Run one at a time with a time budget:
 
 ```sh
@@ -93,8 +105,8 @@ Available targets:
 
 - `FuzzWriteFile`, `FuzzWriteReader`, `FuzzReadBounded`,
   `FuzzValidateAbsClean` (`fuzz_test.go`)
-- `FuzzCommit`, `FuzzSaveJSON`, `FuzzPendingFileRoundTrip`,
-  `FuzzCleanupStaleTemps`, `FuzzIsStaleTempName` (`fuzz_extended_test.go`)
+- `FuzzIsStaleTempName`, `FuzzPendingFileRoundTrip`,
+  `FuzzCleanupStaleTemps` (`fuzz_extended_test.go`)
 
 New parsing or path-handling logic should come with a fuzz target or an
 added seed corpus entry.
@@ -125,14 +137,17 @@ the right file when adding cases:
 - `convergence_test.go`, `niloption_test.go` — guards for variadic
   `Option` handling, including `nil` options interleaved with real ones
   (`buildCfg` skips nils, and the suite enforces it).
-- `dirsync_test.go` — `PhaseDirSync` propagation through every durable
-  entry point via the `fsyncDir` seam.
+- `dirsync_test.go` — parent-dir fsync durability (`Result.Durable`
+  propagation) through every durable entry point via the `fsyncDir` seam.
+- `helpers_test.go` — shared test helpers (`isWindows`, `assertNoTempLeak`,
+  `stubFsyncDir`, `stubOsChown`, `plainReader`, capture-handler logging,
+  `seqCancelCtx`, ...).
 - `example_test.go`, `readme_example_test.go` — runnable `Example`
   functions and the README snippet, kept compiling.
 - `benchmark_test.go` — allocation/throughput benchmarks.
 
 When you add an `Option` or a new entry point, extend the convergence and
-dir-sync suites so the nil-option guard and `PhaseDirSync` propagation stay
+dir-sync suites so the nil-option guard and `Result.Durable` propagation stay
 covered for the new surface.
 
 ## Commits and PRs
