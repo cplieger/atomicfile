@@ -1,4 +1,4 @@
-module github.com/cplieger/atomicfile
+module github.com/cplieger/atomicfile/v2
 
 go 1.26.4
 

@@ -12,7 +12,7 @@ import (
 func TestNilOptionElement(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
-	if err := WriteFile(context.Background(), p, []byte("x"), nil, WithMode(0o600)); err != nil {
+	if _, err := WriteFile(context.Background(), p, []byte("x"), nil, WithMode(0o600)); err != nil {
 		t.Fatalf("WriteFile with nil option element: %v", err)
 	}
 	if _, err := os.Stat(p); err != nil {
