@@ -1,11 +1,12 @@
 # atomicfile
 
-[![CI](https://github.com/cplieger/atomicfile/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/atomicfile/actions/workflows/ci.yaml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v2.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v2)
+[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/atomicfile)](https://goreportcard.com/report/github.com/cplieger/atomicfile)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/atomicfile/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/atomicfile)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/coverage.json)](https://github.com/cplieger/atomicfile/actions/workflows/coverage.yml)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/coverage.json)](https://github.com/cplieger/atomicfile/actions/workflows/coverage.yml)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13198/badge)](https://www.bestpractices.dev/projects/13198)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/atomicfile/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/atomicfile)
 
 > Crash-safe atomic file writes for Go
 
