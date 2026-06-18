@@ -116,24 +116,24 @@ A nil error means the data reached its final path: the write either fully succee
 
 All write functions accept variadic `Option` values. Omit options for defaults.
 
-| Option | Description |
-|--------|-------------|
-| `WithLogger(l)` | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`) |
-| `WithMode(mode)` | File permission (default: `0o644`) |
-| `WithMkdirMode(mode)` | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error. |
-| `WithPreserveMode()` | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist |
-| `WithPreserveOwnership()` | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent or off Unix) |
-| `WithNoSync()` | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false. |
-| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`) |
+| Option                     | Description                                                                                                                   |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                       |
+| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                            |
+| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.  |
+| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist |
+| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent or off Unix)     |
+| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                   |
+| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                    |
 
 ## Errors
 
-| Sentinel | Meaning |
-|----------|---------|
-| `ErrEmptyPath` | The path argument was empty |
-| `ErrUnsafePath` | The path failed the local safety check (relative, null byte, or `..` traversal) |
-| `ErrFileTooLarge` | The file exceeded the `ReadBounded` size limit |
-| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set |
+| Sentinel           | Meaning                                                                         |
+| ------------------ | ------------------------------------------------------------------------------- |
+| `ErrEmptyPath`     | The path argument was empty                                                     |
+| `ErrUnsafePath`    | The path failed the local safety check (relative, null byte, or `..` traversal) |
+| `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit                                  |
+| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                |
 
 Hard write failures are reported as `*WriteError{Err, Phase}`, where `Phase` identifies the failed step: `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
 
@@ -162,14 +162,14 @@ Every temp file this package creates is named `.atomicfile-<digits>.tmp` (`os.Cr
 
 ## Unsupported by Design
 
-| Feature | Rationale |
-|---------|-----------|
-| **Windows rename-over semantics** | Target platform is Linux. `os.Rename` is atomic on Linux. Windows cannot guarantee atomicity ([golang/go#22397](https://github.com/golang/go/issues/22397#issuecomment-498856679)). google/renameio also refuses Windows. |
-| **`fs.FS` interop** | `fs.FS` is a read-only interface. Atomic writes are inherently outside its scope. |
-| **Atomic symlink replacement** | Out of scope. Use google/renameio if needed. |
-| **Umask-aware permissions** | The library uses `Chmod` for exact permissions (ignoring umask). This is the correct secure default for server/CLI tools. Equivalent to renameio's `WithStaticPermissions`. |
-| **`TempDir` cross-mount detection** | Temp files are always created in the target directory (same mount point), the only correct approach for atomic rename. |
-| **`os.Root` scoped operations** | Niche security feature not needed by target consumers. |
+| Feature                             | Rationale                                                                                                                                                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Windows rename-over semantics**   | Target platform is Linux. `os.Rename` is atomic on Linux. Windows cannot guarantee atomicity ([golang/go#22397](https://github.com/golang/go/issues/22397#issuecomment-498856679)). google/renameio also refuses Windows. |
+| **`fs.FS` interop**                 | `fs.FS` is a read-only interface. Atomic writes are inherently outside its scope.                                                                                                                                         |
+| **Atomic symlink replacement**      | Out of scope. Use google/renameio if needed.                                                                                                                                                                              |
+| **Umask-aware permissions**         | The library uses `Chmod` for exact permissions (ignoring umask). This is the correct secure default for server/CLI tools. Equivalent to renameio's `WithStaticPermissions`.                                               |
+| **`TempDir` cross-mount detection** | Temp files are always created in the target directory (same mount point), the only correct approach for atomic rename.                                                                                                    |
+| **`os.Root` scoped operations**     | Niche security feature not needed by target consumers.                                                                                                                                                                    |
 
 ## License
 
