@@ -33,7 +33,7 @@ func resolveMode(target string, c *cfg) os.FileMode {
 			return fi.Mode().Perm()
 		}
 		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Debug("atomicfile: preserve-mode stat failed; using explicit mode",
+			c.logger.Warn("atomicfile: preserve-mode stat failed; using explicit mode",
 				"target", target, "error", err)
 		}
 	}
@@ -57,7 +57,7 @@ func applyOwnership(tmpName, target string, c *cfg) {
 	fi, err := os.Stat(target)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Debug("atomicfile: preserve-ownership stat failed; keeping writer ownership",
+			c.logger.Warn("atomicfile: preserve-ownership stat failed; keeping writer ownership",
 				"target", target, "error", err)
 		}
 		return
@@ -68,7 +68,7 @@ func applyOwnership(tmpName, target string, c *cfg) {
 	}
 	if err := osChown(tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
 		c.logger.Warn("atomicfile: preserve-ownership chown failed; keeping writer ownership",
-			"target", target, "error", err)
+			"target", target, "uid", stat.Uid, "gid", stat.Gid, "error", err)
 	}
 }
 
@@ -92,7 +92,7 @@ func openTempForPath(ctx context.Context, path string, c *cfg) (tmp *os.File, cl
 	dir = filepath.Dir(cleanPath)
 	if c.mkdirMode != 0 {
 		if mkErr := os.MkdirAll(dir, c.mkdirMode); mkErr != nil {
-			return nil, "", "", mkErr
+			return nil, "", "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
 		}
 	}
 	tmp, err = os.CreateTemp(dir, tempPattern)
@@ -169,11 +169,15 @@ func commitTemp(tmpName, cleanPath, dir string, c *cfg) (durable bool, err error
 	return true, nil
 }
 
-// WriteFile atomically writes data to path. Mode defaults to 0o644 (override
-// with WithMode). A nil error means the data is at path; check Result.Durable
-// for crash durability.
-func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (Result, error) {
-	c := buildCfg(opts)
+// writeAtomic runs the open -> write -> finalize -> commit orchestration shared
+// by WriteFile and WriteReader: open the temp file, capture its name under the
+// committed-flag leak-cleanup defer, run the caller's writeData step, then hand
+// off to the temp-side barrier and commit. writeData is the only varying part
+// (the byte slice write vs the reader copy); a write error it returns is tagged
+// PhaseTempWrite here so both entry points report failures identically. Keep in
+// sync with PendingFile.commit, which reuses the same barrier/commit helpers but
+// skips this open/write preamble (its file is already open and written).
+func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.File) error) (Result, error) {
 	tmp, cleanPath, dir, err := openTempForPath(ctx, path, c)
 	if err != nil {
 		return Result{}, err
@@ -186,7 +190,7 @@ func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (R
 			removeTemp(tmpName, c.logger)
 		}
 	}()
-	if _, wErr := tmp.Write(data); wErr != nil {
+	if wErr := writeData(tmp); wErr != nil {
 		tmp.Close()
 		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}
 	}
@@ -199,6 +203,16 @@ func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (R
 		return Result{}, cErr
 	}
 	return Result{Path: cleanPath, Durable: durable}, nil
+}
+
+// WriteFile atomically writes data to path. Mode defaults to 0o644 (override
+// with WithMode). A nil error means the data is at path; check Result.Durable
+// for crash durability.
+func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (Result, error) {
+	return writeAtomic(ctx, path, buildCfg(opts), func(tmp *os.File) error {
+		_, err := tmp.Write(data)
+		return err
+	})
 }
 
 // readerCtx wraps an io.Reader so each Read observes ctx cancellation, making
@@ -238,45 +252,40 @@ func (wc writerCtx) Write(p []byte) (int, error) {
 // single-shot sources). ctx is still honored at the durability barrier, so a
 // cancelled write leaves no partial target.
 func WriteReader(ctx context.Context, path string, r io.Reader, opts ...Option) (Result, error) {
-	c := buildCfg(opts)
-	tmp, cleanPath, dir, err := openTempForPath(ctx, path, c)
-	if err != nil {
-		return Result{}, err
-	}
-	mode := resolveMode(cleanPath, c)
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			removeTemp(tmpName, c.logger)
+	return writeAtomic(ctx, path, buildCfg(opts), func(tmp *os.File) error {
+		if wt, ok := r.(io.WriterTo); ok {
+			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: tmp})
+			return err
 		}
-	}()
-	var writeErr error
-	if wt, ok := r.(io.WriterTo); ok {
-		_, writeErr = wt.WriteTo(writerCtx{ctx: ctx, w: tmp})
-	} else {
-		_, writeErr = io.Copy(tmp, readerCtx{ctx: ctx, r: r})
-	}
-	if writeErr != nil {
-		tmp.Close()
-		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: writeErr}
-	}
-	if fErr := finalizeTempFile(ctx, tmp, mode, c.noSync); fErr != nil {
-		return Result{}, fErr
-	}
-	committed = true
-	durable, cErr := commitTemp(tmpName, cleanPath, dir, c)
-	if cErr != nil {
-		return Result{}, cErr
-	}
-	return Result{Path: cleanPath, Durable: durable}, nil
+		_, err := io.Copy(tmp, readerCtx{ctx: ctx, r: r})
+		return err
+	})
 }
+
+// pendingState tracks a PendingFile's terminal lifecycle. A single bool could
+// not distinguish a committed file from a cleaned-up one, so a Commit after
+// Cleanup replayed a zero-value Result with a nil error — a false success. The
+// explicit states let Commit return ErrAborted after Cleanup instead. See
+// ErrAborted.
+type pendingState uint8
+
+const (
+	pendingOpen      pendingState = iota // not yet committed or cleaned up
+	pendingCommitted                     // Commit was attempted; result/err are cached
+	pendingCleaned                       // Cleanup removed the temp; Commit now fails
+)
 
 // PendingFile is a temp file open for writing, destined to atomically replace
 // path on Commit. It embeds *os.File, so callers get the full
 // io.Writer/io.ReaderFrom/fmt.Fprintf surface. The configuration is captured at
 // construction and reused at Commit, so durability options cannot drift between
 // the two calls.
+//
+// A PendingFile is not safe for concurrent use: Commit and Cleanup mutate
+// unsynchronized lifecycle state (state, result, err). Confine each PendingFile
+// to a single goroutine. The package-level WriteFile, WriteReader, ReadBounded,
+// and CleanupStaleTemps are stateless and safe to call concurrently on distinct
+// paths.
 type PendingFile struct {
 	*os.File
 	cfg    *cfg
@@ -285,7 +294,7 @@ type PendingFile struct {
 	dir    string
 	result Result
 	mode   os.FileMode
-	done   bool
+	state  pendingState
 }
 
 // NewPendingFile creates a temp file destined to atomically replace path. Write
@@ -308,18 +317,23 @@ func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingF
 
 // Commit runs the durability barrier (chmod, optional fsync, close), applies
 // ownership, atomically renames the temp into place, and fsyncs the parent
-// directory. After Commit, Cleanup is a no-op. Commit is idempotent: repeated
-// calls return the first result. ctx is checked through the temp-side
-// barrier (before chmod, around the fsync, and before close); a context
-// cancelled at or before close aborts and removes the temp. Once the barrier
-// passes, ownership and the rename run without a further ctx check, so a
-// context cancelled in the narrow window between close and rename still
-// commits.
+// directory. Commit is idempotent: repeated calls return the first result.
+// Calling Commit after Cleanup returns ErrAborted — the temp was already
+// removed, so there is nothing to commit, and a nil error would falsely signal
+// that the data reached its final path. After a successful Commit, Cleanup is a
+// no-op. ctx is checked through the temp-side barrier (before chmod, around the
+// fsync, and before close); a context cancelled at or before close aborts and
+// removes the temp. Once the barrier passes, ownership and the rename run
+// without a further ctx check, so a context cancelled in the narrow window
+// between close and rename still commits.
 func (p *PendingFile) Commit(ctx context.Context) (Result, error) {
-	if p.done {
+	switch p.state {
+	case pendingCommitted:
 		return p.result, p.err
+	case pendingCleaned:
+		return Result{}, ErrAborted
 	}
-	p.done = true
+	p.state = pendingCommitted
 	p.result, p.err = p.commit(ctx)
 	return p.result, p.err
 }
@@ -343,15 +357,21 @@ func (p *PendingFile) commit(ctx context.Context) (Result, error) {
 	return Result{Path: p.path, Durable: durable}, nil
 }
 
-// Cleanup closes and removes the temp file. It is a no-op once Commit has been
-// called. Safe to defer immediately after NewPendingFile.
+// Cleanup closes and removes the temp file, aborting the pending write. It is a
+// no-op once Commit has been called — a successful Commit already moved the data
+// into place, and a failed Commit already removed the temp — and is idempotent
+// across repeated calls. After Cleanup, a subsequent Commit returns ErrAborted.
+// Safe to defer immediately after NewPendingFile.
 func (p *PendingFile) Cleanup() error {
-	if p.done {
+	if p.state != pendingOpen {
 		return nil
 	}
-	p.done = true
+	p.state = pendingCleaned
 	tmpName := p.Name()
-	p.Close()
+	if clErr := p.Close(); clErr != nil {
+		p.cfg.logger.Debug("atomicfile: pending file close during cleanup failed",
+			"path", tmpName, "error", clErr)
+	}
 	if err := os.Remove(tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

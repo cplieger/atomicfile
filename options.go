@@ -38,14 +38,15 @@ func WithMkdirMode(mode os.FileMode) Option {
 
 // WithPreserveMode stats the target before writing and applies its existing
 // mode to the new file, falling back to the WithMode value if the target does
-// not exist.
+// not exist or cannot be stat-ed (a non-ErrNotExist stat failure is logged at Warn).
 func WithPreserveMode() Option {
 	return func(c *cfg) { c.preserveMode = true }
 }
 
 // WithPreserveOwnership stats the target before writing and chowns the temp
 // file to match the target's uid/gid. Requires CAP_CHOWN or root; a no-op when
-// the target does not exist or off Unix. Best-effort: the chown runs after the
+// the target does not exist, cannot be stat-ed, or off Unix (a non-ErrNotExist stat
+// failure is logged at Warn). Best-effort: the chown runs after the
 // temp-file fsync, so unlike content and mode it is not crash-covered. A chown
 // failure is logged at Warn and does not fail the write (the file lands with
 // the writer's ownership).

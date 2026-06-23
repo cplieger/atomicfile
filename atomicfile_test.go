@@ -1341,3 +1341,33 @@ func TestWriteError_Error_FormatsPhasePrefix(t *testing.T) {
 		t.Errorf("WriteError.Error() = %q, want %q", got, want)
 	}
 }
+
+// CleanupStaleTemps must never reclaim a non-regular entry that merely shares
+// the .atomicfile-<digits>.tmp shape (os.CreateTemp only makes regular files).
+// Pins the info.Mode().IsRegular() guard at cleanup.go:74 (added in the
+// per-concern split, previously hits=0). The dir is aged past the cutoff so the
+// ONLY thing sparing it is the non-regular skip, not the mtime guard; without
+// the guard os.Remove would rmdir the empty aged dir and removed would be 1.
+func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	staleDir := filepath.Join(dir, ".atomicfile-555000111.tmp")
+	if err := os.Mkdir(staleDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(staleDir, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	removed, err := CleanupStaleTemps(dir, time.Hour)
+	if err != nil {
+		t.Fatalf("CleanupStaleTemps: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0 (a temp-named directory must never be reclaimed)", removed)
+	}
+	if fi, statErr := os.Stat(staleDir); statErr != nil || !fi.IsDir() {
+		t.Errorf("temp-named directory removed/altered (stat err=%v); IsRegular guard must spare it", statErr)
+	}
+}
