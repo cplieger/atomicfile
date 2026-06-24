@@ -88,8 +88,8 @@ All write primitives return `(Result, error)`. A nil error means the data reache
 ### Streaming Writer
 
 - `NewPendingFile(ctx, path, opts ...Option) (*PendingFile, error)` — open a temp file for incremental writing (mode via `WithMode`)
-- `(*PendingFile).Commit(ctx) (Result, error)` — chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result.
-- `(*PendingFile).Cleanup() error` — close + remove (abort; no-op after Commit). Safe to `defer` immediately after `NewPendingFile`.
+- `(*PendingFile).Commit(ctx) (Result, error)` — chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
+- `(*PendingFile).Cleanup() error` — close + remove (abort; no-op after Commit, idempotent). Safe to `defer` immediately after `NewPendingFile`.
 
 `PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface.
 
@@ -116,15 +116,15 @@ A nil error means the data reached its final path: the write either fully succee
 
 All write functions accept variadic `Option` values. Omit options for defaults.
 
-| Option                     | Description                                                                                                                   |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                       |
-| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                            |
-| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.  |
-| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist |
-| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent or off Unix)     |
-| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                   |
-| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                    |
+| Option                     | Description                                                                                                                                        |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                            |
+| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                                                 |
+| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                       |
+| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed |
+| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)      |
+| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                        |
+| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                                         |
 
 ## Errors
 
@@ -134,8 +134,9 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrUnsafePath`    | The path failed the local safety check (relative, null byte, or `..` traversal) |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit                                  |
 | `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                |
+| `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write       |
 
-Hard write failures are reported as `*WriteError{Err, Phase}`, where `Phase` identifies the failed step: `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
+Failures in the write barrier (create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. Pre-barrier failures are returned as their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All remain inspectable with `errors.Is` / `errors.As`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
 
 ## Durability Guarantees
 

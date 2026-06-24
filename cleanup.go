@@ -79,6 +79,16 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 			}
 			continue
 		}
+		if !info.Mode().IsRegular() {
+			// os.CreateTemp only ever makes regular files; never reclaim a
+			// directory or symlink that merely shares the temp-name shape.
+			// info.Mode() reuses the e.Info() lstat taken above (also needed
+			// for the mtime check below). e.Type() would be equally correct
+			// here: os.ReadDir resolves a DT_UNKNOWN d_type via an eager lstat,
+			// so DirEntry.Type() is authoritative — Info() is just the value
+			// already in hand.
+			continue
+		}
 		if info.ModTime().After(cutoff) {
 			continue
 		}

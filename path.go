@@ -36,7 +36,12 @@ func validateAbsClean(path string) (string, error) {
 // eventual os.Rename, so an attacker who can write the parent directory may
 // create a symlink afterward. Because os.Rename does not follow the final
 // component, the worst case is replacing the attacker's symlink rather than
-// writing through it.
+// writing through it. Note that WithPreserveMode and WithPreserveOwnership
+// read the target's metadata via a symlink-following os.Stat (resolveMode
+// and applyOwnership in write.go), so within this same window an attacker
+// who substitutes a symlink can influence the resulting file's mode or
+// owner -- never its content or location. Keep the parent directory
+// non-attacker-writable to close the window entirely.
 func checkSymlink(target string, c *cfg) error {
 	if c.allowSymlinkTarget {
 		return nil
