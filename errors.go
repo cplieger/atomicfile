@@ -13,6 +13,11 @@ var (
 	// ErrSymlinkTarget is returned when the target path is a symlink and
 	// WithAllowSymlinkTarget was not set.
 	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
+	// ErrAborted is returned by PendingFile.Commit when the pending file was
+	// already aborted by a prior Cleanup. The temp file was removed and nothing
+	// reached the final path, so Commit reports this rather than a zero-value
+	// Result with a nil error, which would falsely signal success.
+	ErrAborted = errors.New("atomicfile: pending file aborted")
 )
 
 // WritePhase identifies which step of an atomic write failed. Each value
