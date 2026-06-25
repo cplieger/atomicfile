@@ -151,3 +151,33 @@ func FuzzWriteReader(f *testing.F) {
 		}
 	})
 }
+
+func FuzzValidateRootName(f *testing.F) {
+	f.Add("out.pfx")
+	f.Add("a/../b.txt")
+	f.Add("../escape")
+	f.Add("/etc/passwd")
+	f.Add("has\x00null")
+	f.Add("")
+	f.Add(".")
+	f.Add("nested/deep/file")
+
+	f.Fuzz(func(t *testing.T, name string) {
+		clean, err := validateRootName(name)
+		if err != nil {
+			return
+		}
+		if clean == "" {
+			t.Fatalf("validateRootName(%q) = %q with nil error, want non-empty", name, clean)
+		}
+		if filepath.IsAbs(clean) {
+			t.Fatalf("validateRootName(%q) = %q, want a relative path", name, clean)
+		}
+		if strings.ContainsRune(clean, 0) {
+			t.Fatalf("validateRootName(%q) = %q, want no null byte", name, clean)
+		}
+		if got := filepath.Clean(clean); got != clean {
+			t.Fatalf("validateRootName(%q) = %q, want cleaned form %q", name, clean, got)
+		}
+	})
+}

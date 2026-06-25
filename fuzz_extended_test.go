@@ -155,3 +155,47 @@ func FuzzCleanupStaleTemps(f *testing.F) {
 		}
 	})
 }
+
+func FuzzWriteFileInRoot(f *testing.F) {
+	f.Add([]byte("payload"), "out.pfx")
+	f.Add([]byte{}, "a/../b.txt")
+	f.Add([]byte("x"), "../escape")
+	f.Add([]byte("y"), "nested/deep/file")
+	f.Add([]byte("z"), "/etc/passwd")
+	f.Add([]byte("n"), "has\x00null")
+	f.Add([]byte("\x00\xff"), "bin.dat")
+
+	f.Fuzz(func(t *testing.T, content []byte, name string) {
+		dir := t.TempDir()
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			t.Fatalf("OpenRoot(%q) = %v", dir, err)
+		}
+		defer root.Close()
+
+		res, err := WriteFileInRoot(context.Background(), root, name, content, WithMkdirMode(0o755))
+		if err != nil {
+			return
+		}
+
+		got, err := os.ReadFile(res.Path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) = %v", res.Path, err)
+		}
+		if !bytes.Equal(got, content) {
+			t.Fatalf("content mismatch for name %q: got %d bytes, want %d", name, len(got), len(content))
+		}
+
+		real, err := filepath.EvalSymlinks(res.Path)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q) = %v", res.Path, err)
+		}
+		realDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatalf("EvalSymlinks(%q) = %v", dir, err)
+		}
+		if !strings.HasPrefix(real, realDir) {
+			t.Fatalf("write escaped root: %q not under %q", real, realDir)
+		}
+	})
+}
