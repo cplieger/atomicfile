@@ -57,6 +57,29 @@ func stubOsChown(t *testing.T, err error) {
 	osChown = func(string, int, int) error { return err }
 }
 
+// stubFsyncRootDir replaces the package fsyncRootDir seam with one that returns
+// err, restoring the original when the test finishes. Tests using it must not
+// call t.Parallel: they mutate package state.
+func stubFsyncRootDir(t *testing.T, err error) {
+	t.Helper()
+	orig := fsyncRootDir
+	t.Cleanup(func() { fsyncRootDir = orig })
+	fsyncRootDir = func(*os.Root, string) error { return err }
+}
+
+// openTestRoot makes a temp dir, opens it as an *os.Root, and registers the
+// root's close. It returns the root and its directory path.
+func openTestRoot(t *testing.T) (*os.Root, string) {
+	t.Helper()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot(%q) = %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root, dir
+}
+
 // plainReader wraps an io.Reader so the wrapper does NOT satisfy io.WriterTo,
 // forcing WriteReader down the readerCtx (io.Copy) path.
 type plainReader struct {

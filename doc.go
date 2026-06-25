@@ -4,7 +4,8 @@
 //
 // # Result and durability
 //
-// The write primitives (WriteFile, WriteReader, and PendingFile.Commit)
+// The write primitives (WriteFile, WriteReader, WriteFileInRoot,
+// WriteReaderInRoot, and PendingFile.Commit)
 // return a Result alongside an error. A nil error means the data reached its
 // final path; the write either fully succeeded or, at worst, was renamed into
 // place but the parent-directory fsync failed. Result.Durable distinguishes

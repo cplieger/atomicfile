@@ -14,7 +14,11 @@ import (
 
 // Result reports the outcome of an atomic write that reached its final path.
 type Result struct {
-	// Path is the cleaned, absolute final path the data was written to.
+	// Path is the cleaned final path the data was written to. It is
+	// absolute for the package-level write functions (which require an
+	// absolute path); for WriteFileInRoot and WriteReaderInRoot it is
+	// root.Name() joined with the cleaned relative name, so it is relative
+	// when the *os.Root was opened with a relative path.
 	Path string
 	// Durable reports whether the write is guaranteed to survive a crash:
 	// true only when the file and its parent directory were both fsynced.
@@ -182,7 +186,6 @@ func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.Fi
 	if err != nil {
 		return Result{}, err
 	}
-	mode := resolveMode(cleanPath, c)
 	tmpName := tmp.Name()
 	committed := false
 	defer func() {
@@ -190,6 +193,7 @@ func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.Fi
 			removeTemp(tmpName, c.logger)
 		}
 	}()
+	mode := resolveMode(cleanPath, c)
 	if wErr := writeData(tmp); wErr != nil {
 		tmp.Close()
 		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}

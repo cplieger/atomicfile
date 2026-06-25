@@ -25,8 +25,8 @@ func saturateAdd(a, b int64) int64 {
 // Unlike the write primitives, ReadBounded does NOT refuse symlink targets:
 // os.Open follows symlinks, so a symlink at path is resolved and its target is
 // read. Callers reading from a directory writable by a less-trusted principal
-// should resolve and confine the path themselves (e.g. filepath.EvalSymlinks
-// plus a root check) before calling.
+// should confine the path themselves: open the file through an *os.Root and
+// read it with ReadBoundedFile, which applies the same size and context bounds.
 func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, error) {
 	cleanPath, err := validateAbsClean(path)
 	if err != nil {
@@ -40,6 +40,24 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 		return nil, err
 	}
 	defer f.Close()
+	return ReadBoundedFile(ctx, f, maxBytes)
+}
+
+// ReadBoundedFile reads up to maxBytes from an already-open file using the same
+// size validation as ReadBounded: it returns ErrFileTooLarge if the file
+// exceeds maxBytes (including if it grows past the limit during the read), and
+// checks ctx before the size stat and before the read. The caller owns f;
+// ReadBoundedFile does not close it.
+//
+// This is the seam for callers that must open the file themselves before
+// reading it — most importantly, opening through an *os.Root (Go 1.24+) to
+// confine the path to a trusted directory, which ReadBounded cannot do because
+// os.Open follows symlinks. Open the file via the root, then read it here to get
+// the identical bounds and context handling.
+func ReadBoundedFile(ctx context.Context, f *os.File, maxBytes int64) ([]byte, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("atomicfile: %w", ctxErr)
+	}
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err

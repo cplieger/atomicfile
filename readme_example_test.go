@@ -66,3 +66,20 @@ func ExamplePendingFile() {
 	fmt.Println(string(data))
 	// Output: incremental
 }
+
+func ExampleWriteFileInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	root, _ := os.OpenRoot(dir)
+	defer func() { _ = root.Close() }()
+	// name is relative to the root; a symlink or ".." in it cannot escape the
+	// root's tree (Go 1.24+).
+	_, _ = atomicfile.WriteFileInRoot(context.Background(), root, "rooted.txt",
+		[]byte("confined"))
+	// Read it back through the same root with the bounded-read seam.
+	f, _ := root.Open("rooted.txt")
+	defer func() { _ = f.Close() }()
+	data, _ := atomicfile.ReadBoundedFile(context.Background(), f, 1<<20)
+	fmt.Println(string(data))
+	// Output: confined
+}

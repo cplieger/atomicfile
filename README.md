@@ -28,6 +28,7 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/cplieger/atomicfile/v2"
@@ -70,6 +71,19 @@ func main() {
 	atomicfile.WriteFile(ctx, "/tmp/cache.txt", []byte("fast"),
 		atomicfile.WithNoSync())
 
+	// Confined I/O through an *os.Root (Go 1.24+): name is relative to the root,
+	// and a symlink or ".." in it can never escape the root's tree.
+	root, _ := os.OpenRoot("/tmp")
+	defer root.Close()
+	atomicfile.WriteFileInRoot(ctx, root, "rooted.txt", []byte("confined"))
+
+	// Read it back through the same root: open via the root (so the path stays
+	// confined), then bound the read with ReadBoundedFile.
+	rf, _ := root.Open("rooted.txt")
+	defer rf.Close()
+	rooted, _ := atomicfile.ReadBoundedFile(ctx, rf, 1<<20)
+	log.Printf("read %d confined bytes", len(rooted))
+
 	// Bounded read.
 	data, _ := atomicfile.ReadBounded(ctx, "/tmp/data.txt", 1<<20)
 	log.Printf("read %d bytes", len(data))
@@ -84,6 +98,8 @@ All write primitives return `(Result, error)`. A nil error means the data reache
 
 - `WriteFile(ctx, path, data, opts ...Option) (Result, error)` — atomic write (default mode 0644)
 - `WriteReader(ctx, path, r, opts ...Option) (Result, error)` — atomic write from `io.Reader` (uses the `io.WriterTo` fast path when available; mode via `WithMode`)
+- `WriteFileInRoot(ctx, root, name, data, opts ...Option) (Result, error)` — atomic write of `data` to `name` relative to an `*os.Root`; every filesystem op runs through the root, so a symlink or `..` in `name` cannot escape its tree
+- `WriteReaderInRoot(ctx, root, name, r, opts ...Option) (Result, error)` — same, streaming from an `io.Reader`
 
 ### Streaming Writer
 
@@ -96,6 +112,7 @@ All write primitives return `(Result, error)`. A nil error means the data reache
 ### Read Functions
 
 - `ReadBounded(ctx, path, maxBytes) ([]byte, error)` — size-checked read; returns `ErrFileTooLarge` past the limit
+- `ReadBoundedFile(ctx, f, maxBytes) ([]byte, error)` — size-checked read from an already-open `*os.File` (the seam for reading a file opened through an `*os.Root`); the caller owns and closes `f`
 
 ### Utilities
 
@@ -105,7 +122,7 @@ All write primitives return `(Result, error)`. A nil error means the data reache
 
 ```go
 type Result struct {
-	Path    string // cleaned, absolute final path
+	Path    string // cleaned final path (absolute for the package-level writers; root-relative for WriteFileInRoot/WriteReaderInRoot)
 	Durable bool   // true only when file + parent-dir fsync both completed
 }
 ```
@@ -157,6 +174,8 @@ By default, all write functions refuse to write to a path that is currently a sy
 
 To opt in to writing through a symlink (replacing the symlink with a regular file), use `WithAllowSymlinkTarget()`. To write to the link's target instead, resolve it with `filepath.EvalSymlinks` first.
 
+Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself -- open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root.
+
 ## Temp Files
 
 Every temp file this package creates is named `.atomicfile-<digits>.tmp` (`os.CreateTemp` replaces the pattern's `*` with a decimal random string). `CleanupStaleTemps` reclaims orphaned temps of exactly that shape and nothing else, so it never deletes a caller-owned file.
@@ -170,7 +189,6 @@ Every temp file this package creates is named `.atomicfile-<digits>.tmp` (`os.Cr
 | **Atomic symlink replacement**      | Out of scope. Use google/renameio if needed.                                                                                                                                                                              |
 | **Umask-aware permissions**         | The library uses `Chmod` for exact permissions (ignoring umask). This is the correct secure default for server/CLI tools. Equivalent to renameio's `WithStaticPermissions`.                                               |
 | **`TempDir` cross-mount detection** | Temp files are always created in the target directory (same mount point), the only correct approach for atomic rename.                                                                                                    |
-| **`os.Root` scoped operations**     | Niche security feature not needed by target consumers.                                                                                                                                                                    |
 
 ## License
 
