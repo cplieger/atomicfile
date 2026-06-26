@@ -183,3 +183,20 @@ func (c *seqCancelCtx) Err() error {
 	}
 	return nil
 }
+
+// captureHandler is a slog.Handler that records every emitted record, letting
+// the best-effort logging tests assert which Debug/Info/Warn lines fired.
+type captureHandler struct {
+	records []slog.Record
+	mu      sync.Mutex
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, r.Clone())
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
