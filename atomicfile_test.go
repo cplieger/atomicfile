@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"math"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -689,21 +691,6 @@ func TestValidateAbsClean(t *testing.T) {
 	})
 }
 
-func TestOptions_Logger(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "logged.txt")
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	if _, err := WriteFile(context.Background(), path, []byte("data"), WithLogger(logger)); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	got, _ := os.ReadFile(path)
-	if string(got) != "data" {
-		t.Errorf("got %q, want %q", got, "data")
-	}
-}
-
 func TestWriteFile_ro_dir(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits")
@@ -947,29 +934,6 @@ func TestPendingFile(t *testing.T) {
 		got, _ := os.ReadFile(path)
 		if string(got) != "once" {
 			t.Errorf("got %q, want %q", got, "once")
-		}
-	})
-
-	t.Run("cleanup_noop_after_commit", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "noop.txt")
-		pf, err := NewPendingFile(context.Background(), path)
-		if err != nil {
-			t.Fatalf("NewPendingFile: %v", err)
-		}
-		if _, err := pf.Write([]byte("data")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		if _, err := pf.Commit(context.Background()); err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
-		if err := pf.Cleanup(); err != nil {
-			t.Fatalf("Cleanup after commit: %v", err)
-		}
-		got, _ := os.ReadFile(path)
-		if string(got) != "data" {
-			t.Errorf("file corrupted after Cleanup post-commit")
 		}
 	})
 
@@ -1369,5 +1333,931 @@ func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
 	}
 	if fi, statErr := os.Stat(staleDir); statErr != nil || !fi.IsDir() {
 		t.Errorf("temp-named directory removed/altered (stat err=%v); IsRegular guard must spare it", statErr)
+	}
+}
+
+// ── WriteFile / WriteReader error and edge-case paths ──────────────────────
+
+func TestWriteReader_ErroringReader_CleansUpTemp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "errreader.txt")
+	// plainReader hides the WriterTo implementation, forcing the io.Copy path.
+	r := plainReader{r: &errReader{n: 100, err: errors.New("simulated IO error")}}
+	_, err := WriteReader(context.Background(), path, r)
+	if err == nil {
+		t.Fatal("expected error from erroring reader")
+	}
+	var we *WriteError
+	if !errors.As(err, &we) {
+		t.Fatalf("error = %T, want *WriteError", err)
+	}
+	if we.Phase != PhaseTempWrite {
+		t.Errorf("WriteError.Phase = %v, want PhaseTempWrite", we.Phase)
+	}
+	assertNoTempLeak(t, dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("target file should not exist after reader error")
+	}
+}
+
+func TestWriteReader_WriterTo_Error_CleansUp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "writerto-err.txt")
+	r := &errWriterTo{err: errors.New("WriterTo failure")}
+	_, err := WriteReader(context.Background(), path, r)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	assertNoTempLeak(t, dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("target file should not exist after WriterTo error")
+	}
+}
+
+func TestWriteReader_EmptyReader(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty-reader.txt")
+	if _, err := WriteReader(context.Background(), path, strings.NewReader("")); err != nil {
+		t.Fatalf("WriteReader(empty): %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if len(got) != 0 {
+		t.Fatalf("expected empty file, got %d bytes", len(got))
+	}
+}
+
+func TestWriteFile_ZeroPerm(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "noperm.txt")
+	if _, err := WriteFile(context.Background(), path, []byte("secret"), WithMode(0o000)); err != nil {
+		t.Fatalf("WriteFile(0o000): %v", err)
+	}
+	fi, _ := os.Stat(path)
+	if fi.Mode().Perm() != 0o000 {
+		t.Errorf("mode = %o, want 0000", fi.Mode().Perm())
+	}
+	_ = os.Chmod(path, 0o644)
+}
+
+func TestPreserveMode_OverridesExplicitMode(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode not meaningful on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pm.txt")
+	if err := os.WriteFile(path, []byte("old"), 0o751); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// WithPreserveMode takes priority over an explicit WithMode for an existing target.
+	if _, err := WriteFile(context.Background(), path, []byte("new"),
+		WithMode(0o600), WithPreserveMode()); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(path)
+	if fi.Mode().Perm() != 0o751 {
+		t.Fatalf("PreserveMode should override WithMode; got %o, want 0751", fi.Mode().Perm())
+	}
+}
+
+func TestWriteFile_SymlinkInParentDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	realDir := filepath.Join(dir, "realdir")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	linkDir := filepath.Join(dir, "linkdir")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// The target file itself is not a symlink, only an ancestor directory is,
+	// so the write is permitted and lands in the real directory.
+	path := filepath.Join(linkDir, "file.txt")
+	if _, err := WriteFile(context.Background(), path, []byte("through symlink parent")); err != nil {
+		t.Fatalf("WriteFile through symlink parent: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(realDir, "file.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile from realdir: %v", err)
+	}
+	if string(got) != "through symlink parent" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestMkdirMode_BlockedByFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("I am a file"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A regular file in the parent chain makes the symlink pre-check's Lstat
+	// fail ENOTDIR before MkdirAll; the write must error and leave no temp.
+	path := filepath.Join(blocker, "sub", "file.txt")
+	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
+	if err == nil {
+		t.Fatal("expected error when the parent chain is blocked by a file")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// TestWriteFile_MkdirMode_ParentNotWritable_WrapsError reaches the MkdirAll
+// failure branch that TestMkdirMode_BlockedByFile cannot: a traversable but
+// non-writable parent passes the symlink pre-check (ENOENT on the missing leaf)
+// while MkdirAll then fails EACCES, so the error is the "create parent
+// directory" wrap of os.ErrPermission, never a *WriteError (which is reserved
+// for post-temp-create phases). Non-root only; not parallel, matching the
+// sibling permission tests.
+func TestWriteFile_MkdirMode_ParentNotWritable_WrapsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses EACCES")
+	}
+	dir := t.TempDir()
+	ro := filepath.Join(dir, "ro")
+	if err := os.Mkdir(ro, 0o555); err != nil { // traversable (x), not writable (no w)
+		t.Fatalf("mkdir ro: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+
+	path := filepath.Join(ro, "sub", "file.txt")
+	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
+
+	if err == nil {
+		t.Fatal("expected error creating a parent directory under a non-writable dir")
+	}
+	if !strings.Contains(err.Error(), "create parent directory") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "create parent directory")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Errorf("error = %v, want it to wrap os.ErrPermission", err)
+	}
+	var we *WriteError
+	if errors.As(err, &we) {
+		t.Errorf("error is *WriteError{Phase=%v}, want a plain wrapped error", we.Phase)
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// ── Path / size validation across entry points ─────────────────────────────
+
+func TestNullByte_AllEntryPoints(t *testing.T) {
+	t.Parallel()
+	nullPath := "/tmp/test\x00evil"
+
+	t.Run("WriteFile", func(t *testing.T) {
+		if _, err := WriteFile(context.Background(), nullPath, []byte("x")); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
+		}
+	})
+	t.Run("WriteReader", func(t *testing.T) {
+		if _, err := WriteReader(context.Background(), nullPath, strings.NewReader("x")); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
+		}
+	})
+	t.Run("NewPendingFile", func(t *testing.T) {
+		if _, err := NewPendingFile(context.Background(), nullPath); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
+		}
+	})
+	t.Run("ReadBounded", func(t *testing.T) {
+		if _, err := ReadBounded(context.Background(), nullPath, 1024); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("got %v, want ErrUnsafePath", err)
+		}
+	})
+}
+
+func TestEmptyPath_AllEntryPoints(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	if _, err := WriteFile(ctx, "", []byte("x")); !errors.Is(err, ErrEmptyPath) {
+		t.Errorf("WriteFile empty: %v", err)
+	}
+	if _, err := WriteReader(ctx, "", strings.NewReader("x")); !errors.Is(err, ErrEmptyPath) {
+		t.Errorf("WriteReader empty: %v", err)
+	}
+	if _, err := NewPendingFile(ctx, ""); !errors.Is(err, ErrEmptyPath) {
+		t.Errorf("NewPendingFile empty: %v", err)
+	}
+	if _, err := ReadBounded(ctx, "", 1024); !errors.Is(err, ErrEmptyPath) {
+		t.Errorf("ReadBounded empty: %v", err)
+	}
+}
+
+func TestSaturateAdd_EdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		a, b int64
+		want int64
+	}{
+		{"zero+zero", 0, 0, 0},
+		{"zero+one", 0, 1, 1},
+		{"max+0", math.MaxInt64, 0, math.MaxInt64},
+		{"max+1_saturates", math.MaxInt64, 1, math.MaxInt64},
+		{"max-1+1", math.MaxInt64 - 1, 1, math.MaxInt64},
+		{"max-1+2_saturates", math.MaxInt64 - 1, 2, math.MaxInt64},
+		{"max+max_saturates", math.MaxInt64, math.MaxInt64, math.MaxInt64},
+		{"negative_a", -1, 1, 0},
+		{"both_positive", 100, 200, 300},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := saturateAdd(tt.a, tt.b); got != tt.want {
+				t.Errorf("saturateAdd(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadBounded_ZeroMax(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonempty.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := ReadBounded(context.Background(), path, 0); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("ReadBounded(0) = %v, want ErrFileTooLarge", err)
+	}
+}
+
+func TestReadBounded_ZeroMax_EmptyFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	data, err := ReadBounded(context.Background(), path, 0)
+	if err != nil {
+		t.Fatalf("ReadBounded(empty, 0): %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("got %d bytes", len(data))
+	}
+}
+
+func TestReadBounded_NegativeMax(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := ReadBounded(context.Background(), path, -1); err == nil {
+		t.Fatal("expected error for negative maxBytes")
+	}
+}
+
+func TestReadBounded_GrowsPastLimitDuringRead(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFO not supported on Windows")
+	}
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "pipe")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Skipf("Mkfifo unsupported: %v", err)
+	}
+	// A FIFO reports Size()==0 from Stat, so the pre-read size gate passes;
+	// the post-read length recheck is the only guard that can catch the
+	// overflow. A regular file of this size would be rejected earlier.
+	const limit = 8
+	payload := bytes.Repeat([]byte("x"), limit+4)
+	go func() {
+		w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		defer w.Close()
+		_, _ = w.Write(payload)
+	}()
+	if _, err := ReadBounded(context.Background(), fifo, limit); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("ReadBounded(fifo overflow) = %v, want ErrFileTooLarge", err)
+	}
+}
+
+// ReadBounded checks ctx before the open and again after the stat. cancelAt=2
+// trips the post-stat guard (the open and stat succeed first).
+func TestReadBounded_CancelAfterStat(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ctx-after-stat.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	if _, err := ReadBounded(ctx, path, 1024); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadBounded(cancel-after-stat) = %v, want context.Canceled", err)
+	}
+}
+
+// ── Concurrency: many writers racing the same path leave it consistent ─────
+
+func TestWriteFile_ConcurrentSamePath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "race.txt")
+	var wg sync.WaitGroup
+	const N = 30
+	for i := range N {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = WriteFile(context.Background(), path, []byte(strings.Repeat("A", idx+1)))
+		}(i)
+	}
+	wg.Wait()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || len(got) > N {
+		t.Fatalf("unexpected len=%d", len(got))
+	}
+	assertNoTempLeak(t, dir)
+}
+
+func TestWriteReader_ConcurrentSamePath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "wr-race.txt")
+	var wg sync.WaitGroup
+	const N = 15
+	for i := range N {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = WriteReader(context.Background(), p, bytes.NewReader(bytes.Repeat([]byte{byte(idx)}, idx+1)))
+		}(i)
+	}
+	wg.Wait()
+	assertNoTempLeak(t, dir)
+}
+
+func TestPendingFile_ConcurrentSamePath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pf-race.txt")
+	var wg sync.WaitGroup
+	const N = 20
+	for i := range N {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			pf, err := NewPendingFile(context.Background(), path, WithNoSync())
+			if err != nil {
+				return
+			}
+			defer func() { _ = pf.Cleanup() }()
+			if _, err := pf.Write([]byte(strings.Repeat("Z", idx+1))); err != nil {
+				return
+			}
+			_, _ = pf.Commit(context.Background())
+		}(i)
+	}
+	wg.Wait()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || len(got) > N {
+		t.Fatalf("unexpected len=%d", len(got))
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// ── Cancellation: whole-call and mid-barrier, never leaving a partial file ─
+
+func TestWrite_CancelledContext_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cancel.txt")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _ = WriteFile(ctx, p, []byte("data"))
+	_, _ = WriteReader(ctx, p, strings.NewReader("data"))
+
+	assertNoTempLeak(t, dir)
+}
+
+// cancelAt=2 trips the ctx guard at the top of finalizeTempFile (after the temp
+// write, before chmod).
+func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "afterwrite.txt")
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	_, err := WriteFile(ctx, path, []byte("data"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFile(cancel-after-write) = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("final file should not exist after mid-write cancellation")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// cancelAt=3 trips the post-Sync ctx guard inside finalizeTempFile.
+func TestWriteFile_CancelAfterSync_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "aftersync.txt")
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
+	_, err := WriteFile(ctx, path, []byte("data"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFile(cancel-after-sync) = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("final file should not exist after post-sync cancellation")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+func TestWriteReader_CancelMidBarrier_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wr-midbarrier.txt")
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	_, err := WriteReader(ctx, path, plainReader{r: strings.NewReader("data")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteReader(cancel-mid-barrier) = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("final file should not exist after mid-barrier cancellation")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// WriteReader takes the io.WriterTo fast path when the source implements it
+// (strings.Reader does). writerCtx wraps the destination so the WriterTo write
+// still observes ctx cancellation. seqCancelCtx{cancelAt:2} passes the
+// openTempForPath ctx check then trips inside the first writerCtx.Write, so the
+// write aborts with a PhaseTempWrite WriteError wrapping context.Canceled,
+// leaving no final file and no temp.
+func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wt-cancel.txt")
+
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	_, err := WriteReader(ctx, path, strings.NewReader("payload"))
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteReader(WriterTo, cancel-during-write) = %v, want context.Canceled", err)
+	}
+	var we *WriteError
+	if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
+		t.Fatalf("error = %v, want *WriteError{PhaseTempWrite}", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("final file exists after cancelled WriterTo write, want absent")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+func TestNewPendingFile_ContextCancel_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "npf.txt")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pf, err := NewPendingFile(ctx, path)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NewPendingFile(cancelled) error = %v, want context.Canceled", err)
+	}
+	if pf != nil {
+		t.Error("NewPendingFile should return nil PendingFile on cancellation")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+func TestPendingFile_Commit_ContextCancel_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cf.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.Write([]byte("data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := pf.Commit(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Commit(cancelled) error = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("final path should not exist after cancelled Commit")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// NewPendingFile runs on a live context, so cancelAt=1 trips the ctx guard at
+// the top of finalizeTempFile during Commit.
+func TestPendingFile_CancelMidBarrier_NoTempLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pf-midbarrier.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile = %v", err)
+	}
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.Write([]byte("data")); err != nil {
+		t.Fatalf("Write = %v", err)
+	}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 1}
+	if _, err := pf.Commit(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Commit(cancel-mid-barrier) = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("final file should not exist after mid-barrier cancellation")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// ── PendingFile lifecycle / state machine ──────────────────────────────────
+
+func TestPendingFile_AbandonedLeak(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abandoned.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("data that will be abandoned")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	tmpName := pf.Name()
+
+	// An abandoned PendingFile keeps its temp until Cleanup/Commit.
+	if _, err := os.Stat(tmpName); err != nil {
+		t.Fatalf("temp file should still exist when abandoned: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if _, err := os.Stat(tmpName); !os.IsNotExist(err) {
+		t.Error("temp not removed after Cleanup")
+	}
+}
+
+func TestPendingFile_DoubleCleanup(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dblclean.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pf.Write([]byte("data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("first Cleanup: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("second Cleanup should be no-op: %v", err)
+	}
+}
+
+func TestPendingFile_CleanupThenCommit_ReturnsAborted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cleancommit.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pf.Write([]byte("data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	// Commit after Cleanup must report ErrAborted, not a false zero-Result
+	// success: the temp was already removed, so nothing reached the final path.
+	res, commitErr := pf.Commit(context.Background())
+	if !errors.Is(commitErr, ErrAborted) {
+		t.Fatalf("Commit after Cleanup = %v, want ErrAborted", commitErr)
+	}
+	if res != (Result{}) {
+		t.Errorf("Commit after Cleanup result = %+v, want zero Result", res)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("file should not exist after Cleanup+Commit")
+	}
+}
+
+// After a successful Commit, Cleanup must be a no-op that does NOT remove the
+// committed file, and a later Commit still replays the original result.
+func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "commit-then-clean.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("kept")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	first, err := pf.Commit(context.Background())
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup after Commit should be a no-op: %v", err)
+	}
+	assertContent(t, path, "kept") // Cleanup must not remove the committed file
+	again, err := pf.Commit(context.Background())
+	if err != nil {
+		t.Fatalf("Commit after a no-op Cleanup: %v", err)
+	}
+	if again != first {
+		t.Errorf("Commit not idempotent across an intervening Cleanup: %+v vs %+v", again, first)
+	}
+}
+
+// A failed Commit lands in the committed state with a cached *WriteError; a
+// second Commit must replay that identical error value (not nil, not ErrAborted,
+// not a fresh error) and the same zero Result, without re-running the barrier or
+// leaking a temp. Closing the embedded fd makes the barrier's first step (Chmod)
+// fail, so this also pins the PhaseTempChmod tag and the on-barrier-failure temp
+// cleanup.
+func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "failed-commit-replay.txt")
+
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("payload")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := pf.Close(); err != nil {
+		t.Fatalf("File.Close: %v", err)
+	}
+
+	firstRes, firstErr := pf.Commit(context.Background())
+	var we *WriteError
+	if !errors.As(firstErr, &we) || we.Phase != PhaseTempChmod {
+		t.Fatalf("first Commit = %v, want *WriteError{PhaseTempChmod}", firstErr)
+	}
+	if firstRes != (Result{}) {
+		t.Fatalf("first Commit result = %+v, want zero Result", firstRes)
+	}
+
+	secondRes, secondErr := pf.Commit(context.Background())
+	if secondErr != firstErr {
+		t.Errorf("second Commit err = %v, want the cached first err %v (identical value)", secondErr, firstErr)
+	}
+	if errors.Is(secondErr, ErrAborted) {
+		t.Errorf("second Commit err = %v, want the cached WriteError, not ErrAborted", secondErr)
+	}
+	if secondRes != firstRes {
+		t.Errorf("second Commit result = %+v, want cached %+v", secondRes, firstRes)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("final file exists after replayed failed Commit, want absent")
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// The PendingFile rename-failure branch: committing onto a NON-EMPTY directory
+// forces os.Rename to fail with ENOTEMPTY on every platform without test seams.
+// The first Commit must tag PhaseRename and clean the temp; a second Commit must
+// replay the same cached error.
+func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target-dir")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
+	}
+
+	pf, err := NewPendingFile(context.Background(), target)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("payload")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_, firstErr := pf.Commit(context.Background())
+	var we *WriteError
+	if !errors.As(firstErr, &we) || we.Phase != PhaseRename {
+		t.Fatalf("Commit(onto non-empty dir) = %v, want *WriteError{PhaseRename}", firstErr)
+	}
+
+	_, secondErr := pf.Commit(context.Background())
+	if secondErr != firstErr {
+		t.Errorf("second Commit = %v, want the cached rename error %v (identical value)", secondErr, firstErr)
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// Cleanup must be best-effort on a close failure: a pre-closed fd makes the
+// internal p.Close() in Cleanup return os.ErrClosed (logged at Debug), which
+// Cleanup MUST swallow and still remove the temp and return nil. A return-clErr
+// regression would leak the temp.
+func TestPendingFile_Cleanup_CloseFailure_StillRemovesTemp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cleanup-closed-fd.txt")
+
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("data")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	tmpName := pf.Name()
+
+	// First Close succeeds and leaves state pendingOpen + the temp on disk;
+	// the internal p.Close() call is then a second close -> os.ErrClosed.
+	if err := pf.Close(); err != nil {
+		t.Fatalf("File.Close: %v", err)
+	}
+
+	if err := pf.Cleanup(); err != nil {
+		t.Errorf("Cleanup after closed fd = %v, want nil (close failure is logged, not returned)", err)
+	}
+	if _, statErr := os.Stat(tmpName); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("temp %q still present after Cleanup, want removed (no leak)", tmpName)
+	}
+	assertNoTempLeak(t, dir)
+}
+
+// TestPendingFile_Cleanup_RemoveFailureSurfacesError pins that
+// (*PendingFile).Cleanup surfaces a temp-removal failure (other than
+// ErrNotExist) as a non-nil error. Replacing the temp with a NON-EMPTY
+// directory triggers ENOTEMPTY, which root cannot bypass, so the assertion holds
+// even when the suite runs as root.
+func TestPendingFile_Cleanup_RemoveFailureSurfacesError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+
+	pf, err := NewPendingFile(context.Background(), target)
+	if err != nil {
+		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
+	}
+	tmpName := pf.Name()
+
+	// Swap the temp file for a non-empty directory at the same path so
+	// Cleanup's os.Remove(tmpName) fails with ENOTEMPTY.
+	replaceWithNonEmptyDir(t, tmpName)
+
+	gotErr := pf.Cleanup()
+	if gotErr == nil {
+		t.Fatalf("Cleanup() (os.Remove hits non-empty dir) = nil, want non-nil error")
+	}
+	if errors.Is(gotErr, fs.ErrNotExist) {
+		t.Fatalf("Cleanup() = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", gotErr)
+	}
+}
+
+// TestPendingFile_Cleanup_SuccessReturnsNil pins the opposite branch: when
+// os.Remove succeeds, Cleanup returns nil and the temp is gone.
+func TestPendingFile_Cleanup_SuccessReturnsNil(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "ok.txt")
+
+	pf, err := NewPendingFile(context.Background(), target)
+	if err != nil {
+		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
+	}
+	tmpName := pf.Name()
+
+	if gotErr := pf.Cleanup(); gotErr != nil {
+		t.Fatalf("Cleanup() (temp removable) = %v, want nil", gotErr)
+	}
+	if _, statErr := os.Stat(tmpName); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("Cleanup() left temp %q: Stat err = %v, want ErrNotExist", tmpName, statErr)
+	}
+}
+
+// ── Best-effort logging (removeTemp, CleanupStaleTemps summaries) ───────────
+
+// A successful temp removal is silent (no Debug log).
+func TestRemoveTemp_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "removable.tmp")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed temp file: %v", err)
+	}
+	h := &captureHandler{}
+
+	removeTemp(path, slog.New(h))
+
+	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 0 {
+		t.Errorf("removeTemp(existing removable file) logged %q %d times, want 0", msgRemoveTempFailed, got)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("removeTemp(%q) left file behind: Stat err = %v, want ErrNotExist", path, err)
+	}
+}
+
+// A removal failing for a reason other than ErrNotExist is logged once at Debug.
+// os.Remove of a non-empty directory fails with a non-ErrNotExist error on every
+// platform, so no permission tricks are needed.
+func TestRemoveTemp_FailedRemoval_LogsDebug(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	nonEmpty := filepath.Join(dir, "busy")
+	if err := os.Mkdir(nonEmpty, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed child: %v", err)
+	}
+	h := &captureHandler{}
+
+	removeTemp(nonEmpty, slog.New(h))
+
+	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 1 {
+		t.Errorf("removeTemp(non-empty dir) logged %q %d times, want 1", msgRemoveTempFailed, got)
+	}
+}
+
+// With exactly one stale temp reclaimed and none failing, the Info "removed"
+// line fires once and the Warn "could not be removed" line never fires.
+func TestCleanupStaleTemps_RemovedTemps_LogsInfoNotWarn(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".atomicfile-123456.tmp")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed stale temp: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	h := &captureHandler{}
+
+	removed, err := CleanupStaleTemps(dir, time.Hour, WithLogger(slog.New(h)))
+	if err != nil {
+		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if got := countLogByMessage(h.records, slog.LevelInfo, msgStaleRemoved); got != 1 {
+		t.Errorf("Info %q count = %d, want 1 (removed=1 must log the summary)", msgStaleRemoved, got)
+	}
+	if got := countLogByMessage(h.records, slog.LevelWarn, msgStaleRemoveFail); got != 0 {
+		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
+	}
+}
+
+// A run that reclaims nothing emits no summary logs.
+func TestCleanupStaleTemps_NothingRemoved_DoesNotLogInfo(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "keep.json"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed unrelated file: %v", err)
+	}
+	h := &captureHandler{}
+
+	removed, err := CleanupStaleTemps(dir, time.Hour, WithLogger(slog.New(h)))
+	if err != nil {
+		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0", removed)
+	}
+	if got := countLogByMessage(h.records, slog.LevelInfo, msgStaleRemoved); got != 0 {
+		t.Errorf("Info %q count = %d, want 0 (removed=0 must not log the summary)", msgStaleRemoved, got)
+	}
+	if got := countLogByMessage(h.records, slog.LevelWarn, msgStaleRemoveFail); got != 0 {
+		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
 	}
 }

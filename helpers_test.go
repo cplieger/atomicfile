@@ -3,7 +3,9 @@ package atomicfile
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -13,6 +15,45 @@ import (
 // isWindows reports whether the test is running on Windows, where POSIX file
 // mode bits are not meaningful.
 func isWindows() bool { return runtime.GOOS == "windows" }
+
+// Log messages asserted by the best-effort logging tests; sharing the literals
+// keeps the tests in lockstep with the production strings they pin.
+const (
+	msgRemoveTempFailed = "atomicfile: temp file cleanup failed"
+	msgStaleRemoved     = "atomicfile.CleanupStaleTemps: removed stale temps"
+	msgStaleRemoveFail  = "atomicfile.CleanupStaleTemps: some stale temps could not be removed"
+)
+
+// countLogByMessage returns how many captured records match both level and
+// message exactly. Used to pin which best-effort log lines fire (and which do
+// not) for a given outcome.
+func countLogByMessage(records []slog.Record, level slog.Level, message string) int {
+	n := 0
+	for _, r := range records {
+		if r.Level == level && r.Message == message {
+			n++
+		}
+	}
+	return n
+}
+
+// replaceWithNonEmptyDir deletes the file at path and puts a non-empty
+// directory in its place. os.Remove of a non-empty directory fails with a
+// non-ErrNotExist error (ENOTEMPTY) on every platform and is NOT bypassed by
+// root, so it forces a temp-removal to fail without any permission tricks.
+func replaceWithNonEmptyDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove temp %q = %v, want nil", path, err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("mkdir %q = %v, want nil", path, err)
+	}
+	child := filepath.Join(path, "child")
+	if err := os.WriteFile(child, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write child %q = %v, want nil", child, err)
+	}
+}
 
 // assertNoTempLeak fails t if dir contains any atomicfile temp artifacts.
 func assertNoTempLeak(t *testing.T, dir string) {

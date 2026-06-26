@@ -3,6 +3,7 @@ package atomicfile
 import (
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,11 +46,51 @@ func isStaleTempName(name string) bool {
 	return isAllDigits(middle)
 }
 
+// reapStaleTemp processes a single directory entry for CleanupStaleTemps. It
+// removes e when e is a stale package temp (".atomicfile-<digits>.tmp", a
+// regular file older than cutoff) and reports the outcome: didRemove is true
+// when the file was unlinked, didFail is true when a stat or remove failed for
+// a reason other than the file already being gone (logged at Debug). At most
+// one of the two is ever true; a non-matching, non-regular, or too-recent entry
+// returns (false, false).
+//
+// os.CreateTemp only ever makes regular files, so a directory or symlink that
+// merely shares the temp-name shape is skipped: never reclaim it. The IsRegular
+// check reuses the e.Info() lstat (also needed for the mtime check); e.Type()
+// would be equally authoritative since os.ReadDir resolves a DT_UNKNOWN d_type
+// via an eager lstat.
+func reapStaleTemp(dir string, e os.DirEntry, cutoff time.Time, logger *slog.Logger) (didRemove, didFail bool) {
+	name := e.Name()
+	if !isStaleTempName(name) {
+		return false, false
+	}
+	info, infErr := e.Info()
+	if infErr != nil {
+		if errors.Is(infErr, fs.ErrNotExist) {
+			return false, false
+		}
+		logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", infErr)
+		return false, true
+	}
+	if !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
+		return false, false
+	}
+	full := filepath.Join(dir, name)
+	if rmErr := os.Remove(full); rmErr != nil {
+		if errors.Is(rmErr, fs.ErrNotExist) {
+			return false, false
+		}
+		logger.Debug("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", rmErr)
+		return false, true
+	}
+	return true, false
+}
+
 // CleanupStaleTemps removes temp files in dir that this package created
 // (".atomicfile-<digits>.tmp") and whose mtime is older than maxAge. It returns
 // the number removed. A missing dir is not an error. Best-effort per file:
-// individual stat/remove failures are logged at Debug and skipped; only a
-// readdir failure is returned.
+// individual stat/remove failures are logged at Debug and skipped (see
+// reapStaleTemp); only a readdir failure is returned.
 func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (removed int, err error) {
 	c := buildCfg(opts)
 	if maxAge <= 0 {
@@ -67,40 +108,13 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 	cutoff := time.Now().Add(-maxAge)
 	failed := 0
 	for _, e := range entries {
-		name := e.Name()
-		if !isStaleTempName(name) {
-			continue
+		didRemove, didFail := reapStaleTemp(dir, e, cutoff, c.logger)
+		if didRemove {
+			removed++
 		}
-		info, infErr := e.Info()
-		if infErr != nil {
-			if !errors.Is(infErr, fs.ErrNotExist) {
-				c.logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", infErr)
-				failed++
-			}
-			continue
+		if didFail {
+			failed++
 		}
-		if !info.Mode().IsRegular() {
-			// os.CreateTemp only ever makes regular files; never reclaim a
-			// directory or symlink that merely shares the temp-name shape.
-			// info.Mode() reuses the e.Info() lstat taken above (also needed
-			// for the mtime check below). e.Type() would be equally correct
-			// here: os.ReadDir resolves a DT_UNKNOWN d_type via an eager lstat,
-			// so DirEntry.Type() is authoritative — Info() is just the value
-			// already in hand.
-			continue
-		}
-		if info.ModTime().After(cutoff) {
-			continue
-		}
-		full := filepath.Join(dir, name)
-		if rmErr := os.Remove(full); rmErr != nil {
-			if !errors.Is(rmErr, fs.ErrNotExist) {
-				c.logger.Debug("atomicfile.CleanupStaleTemps: remove failed", "path", full, "error", rmErr)
-				failed++
-			}
-			continue
-		}
-		removed++
 	}
 	if removed > 0 {
 		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temps", "dir", dir, "count", removed)
