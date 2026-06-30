@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -339,4 +340,115 @@ func TestWriteFileInRoot_PreserveOwnershipSameOwnerSucceeds(t *testing.T) {
 	}
 
 	assertContent(t, res.Path, "new")
+}
+
+// TestWriteFileInRoot_PreserveOwnershipMissingTargetSucceeds pins the
+// best-effort contract for a confined write: when WithPreserveOwnership is set
+// but no target exists yet, ownership preservation has nothing to stat and must
+// be a clean no-op — the write still lands at the final name. The absent-target
+// stat returns a nil FileInfo, so the no-op must be taken from the stat-error
+// branch, not by reaching the *syscall.Stat_t assertion on a nil value.
+func TestWriteFileInRoot_PreserveOwnershipMissingTargetSucceeds(t *testing.T) {
+	if isWindows() {
+		t.Skip("POSIX ownership not meaningful on Windows")
+	}
+	root, dir := openTestRoot(t)
+
+	res, err := WriteFileInRoot(context.Background(), root, "fresh", []byte("data"), WithPreserveOwnership())
+	if err != nil {
+		t.Fatalf("WriteFileInRoot(WithPreserveOwnership) = %v, want nil (a missing target makes ownership preservation a no-op success)", err)
+	}
+
+	assertContent(t, res.Path, "data")
+	assertNoTempLeak(t, dir)
+}
+
+// TestApplyOwnershipInRoot_ChownFailure_LogsOneWarn pins the best-effort
+// contract documented on applyOwnershipInRoot: when the temp-file chown fails,
+// it logs exactly one Warn and never aborts. It mirrors the non-root
+// TestWriteFile_PreserveOwnership_ChownFailure_NonFatal. A chown of a temp name
+// that does not exist fails with ENOENT, forcing the failure without root
+// privileges or a foreign-owned target (which root could chown anyway).
+func TestApplyOwnershipInRoot_ChownFailure_LogsOneWarn(t *testing.T) {
+	if isWindows() {
+		t.Skip("preserve-ownership uses *syscall.Stat_t (Unix-only)")
+	}
+	t.Parallel()
+	root, dir := openTestRoot(t)
+	// A real target so the stat succeeds and execution reaches the chown step.
+	if err := os.WriteFile(filepath.Join(dir, "target"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	h := &captureHandler{}
+	c := buildCfg([]Option{WithPreserveOwnership(), WithLogger(slog.New(h))})
+
+	// "ghost" never exists, so chowning it fails; the contract is a single Warn.
+	applyOwnershipInRoot(root, "ghost", "target", c)
+
+	var warns int
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("warn count = %d, want 1 (a failed chown must log exactly one Warn)", warns)
+	}
+}
+
+// TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug is the root-confined
+// twin of TestRemoveTemp_SuccessfulRemoval_DoesNotLogDebug: a successful
+// removal is silent.
+func TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
+	t.Parallel()
+	root, dir := openTestRoot(t)
+	if err := os.WriteFile(filepath.Join(dir, "removable.tmp"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed temp file: %v", err)
+	}
+	h := &captureHandler{}
+
+	removeTempInRoot(root, "removable.tmp", slog.New(h))
+
+	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 0 {
+		t.Errorf("removeTempInRoot(existing removable file) logged %q %d times, want 0", msgRemoveTempFailed, got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "removable.tmp")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("removeTempInRoot left the file behind: Stat err = %v, want ErrNotExist", err)
+	}
+}
+
+// TestRemoveTempInRoot_FailedRemoval_LogsDebug is the root-confined twin of
+// TestRemoveTemp_FailedRemoval_LogsDebug: a removal failing for a non-ErrNotExist
+// reason is logged once at Debug. A non-empty directory fails os.Remove with
+// ENOTEMPTY on every platform and is not bypassed by root.
+func TestRemoveTempInRoot_FailedRemoval_LogsDebug(t *testing.T) {
+	t.Parallel()
+	root, dir := openTestRoot(t)
+	nonEmpty := filepath.Join(dir, "busy")
+	if err := os.Mkdir(nonEmpty, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed child: %v", err)
+	}
+	h := &captureHandler{}
+
+	removeTempInRoot(root, "busy", slog.New(h))
+
+	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 1 {
+		t.Errorf("removeTempInRoot(non-empty dir) logged %q %d times, want 1", msgRemoveTempFailed, got)
+	}
+}
+
+// TestFsyncRootDir_MissingDir_PropagatesOpenError pins fsyncRootDir's
+// robustness: an open failure must propagate as-is, never be swallowed by
+// syncing a nil file handle. Asking it to fsync a directory that does not exist
+// must return the ErrNotExist open error; the variant that skips the early
+// return instead syncs a nil handle and yields ErrInvalid. It reads the
+// fsyncRootDir seam, so it must not run in parallel.
+func TestFsyncRootDir_MissingDir_PropagatesOpenError(t *testing.T) {
+	root, _ := openTestRoot(t)
+	if err := fsyncRootDir(root, "no-such-dir"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("fsyncRootDir(missing dir) = %v, want an ErrNotExist open error", err)
+	}
 }
