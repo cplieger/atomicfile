@@ -121,9 +121,8 @@ added seed corpus entry.
 ### Mutation testing
 
 `.gremlins.yaml` configures [Gremlins](https://gremlins.dev) mutation
-testing (synced fleet-wide from `cplieger/ci`). The weekly central runner
-tracks the efficacy score; you can run it locally to check that new tests
-actually kill mutants:
+testing (synced from `cplieger/ci`; change it upstream). Run it locally to
+check that new tests actually kill mutants:
 
 ```sh
 gremlins unleash .
