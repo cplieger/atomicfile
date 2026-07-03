@@ -2,7 +2,6 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v2.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v2)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/atomicfile)](https://goreportcard.com/report/github.com/cplieger/atomicfile)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/coverage.json)](https://github.com/cplieger/atomicfile/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13198/badge)](https://www.bestpractices.dev/projects/13198)
@@ -94,7 +93,7 @@ func main() {
 
 ### Write Functions
 
-All write primitives return `(Result, error)`. A nil error means the data reached its final path; inspect `Result.Durable` for crash durability.
+All write primitives return `(Result, error)`; inspect `Result.Durable` for crash durability (see [Result and Durability](#result-and-durability) for the nil-error contract).
 
 - `WriteFile(ctx, path, data, opts ...Option) (Result, error)` — atomic write (default mode 0644)
 - `WriteReader(ctx, path, r, opts ...Option) (Result, error)` — atomic write from `io.Reader` (uses the `io.WriterTo` fast path when available; mode via `WithMode`)
@@ -116,7 +115,7 @@ All write primitives return `(Result, error)`. A nil error means the data reache
 
 ### Utilities
 
-- `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)` — remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape — `.atomicfile-<digits>.tmp` — older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (e.g. `.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched.
+- `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)` — remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape — `.atomicfile-<digits>.tmp`, where the `<digits>` are the decimal random string `os.CreateTemp` substitutes for the pattern's `*` — older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (e.g. `.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched.
 
 ## Result and Durability
 
@@ -159,7 +158,7 @@ Failures in the write barrier (create temp, write, chmod, sync, close, rename) a
 
 Every atomic write follows the sequence: create temp file → write data → fsync temp → close → rename to final path → fsync parent directory. This ensures that after a crash, the file contains either the complete old content or the complete new content — never a partial write. The directory fsync makes the rename durable even if the system loses power immediately after the call returns.
 
-If the parent-directory fsync fails (for example an `EIO` from a failing disk), the rename has already completed, so the new content is present at the final path. The write therefore returns a **nil error** with `Result.Durable == false`, and logs the fsync failure at `Warn`. Callers that require strict durability treat `Durable == false` as actionable (retry or alert); callers that only need atomicity can ignore it or use `WithNoSync()` to skip the directory fsync entirely.
+If the parent-directory fsync fails (for example an `EIO` from a failing disk), the rename has already completed. This is the nil-error, `Result.Durable == false` outcome described under [Result and Durability](#result-and-durability); the write also logs the fsync failure at `Warn`. Callers that require strict durability treat `Durable == false` as actionable (retry or alert); callers that only need atomicity can ignore it or use `WithNoSync()` to skip the directory fsync entirely.
 
 > **Note on auto-created directories.** When `WithMkdirMode` creates new parent
 > directories, only the file's immediate parent is fsynced. The newly created
@@ -176,10 +175,6 @@ To opt in to writing through a symlink (replacing the symlink with a regular fil
 
 Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself -- open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root.
 
-## Temp Files
-
-Every temp file this package creates is named `.atomicfile-<digits>.tmp` (`os.CreateTemp` replaces the pattern's `*` with a decimal random string). `CleanupStaleTemps` reclaims orphaned temps of exactly that shape and nothing else, so it never deletes a caller-owned file.
-
 ## Unsupported by Design
 
 | Feature                             | Rationale                                                                                                                                                                                                                 |
@@ -189,6 +184,12 @@ Every temp file this package creates is named `.atomicfile-<digits>.tmp` (`os.Cr
 | **Atomic symlink replacement**      | Out of scope. Use google/renameio if needed.                                                                                                                                                                              |
 | **Umask-aware permissions**         | The library uses `Chmod` for exact permissions (ignoring umask). This is the correct secure default for server/CLI tools. Equivalent to renameio's `WithStaticPermissions`.                                               |
 | **`TempDir` cross-mount detection** | Temp files are always created in the target directory (same mount point), the only correct approach for atomic rename.                                                                                                    |
+
+## Disclaimer
+
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
+
+This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 
