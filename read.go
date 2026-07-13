@@ -2,6 +2,7 @@ package atomicfile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -57,6 +58,9 @@ func ReadBounded(ctx context.Context, path string, maxBytes int64) ([]byte, erro
 func ReadBoundedFile(ctx context.Context, f *os.File, maxBytes int64) ([]byte, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, fmt.Errorf("atomicfile: %w", ctxErr)
+	}
+	if f == nil {
+		return nil, errors.New("atomicfile: nil file")
 	}
 	fi, err := f.Stat()
 	if err != nil {

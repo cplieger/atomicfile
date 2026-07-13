@@ -31,6 +31,19 @@ func TestValidateAbsClean(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts_literal_dots_in_path_segment", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range []string{"/tmp/foo../bar", "/tmp/.../file"} {
+			got, err := validateAbsClean(in)
+			if err != nil {
+				t.Fatalf("validateAbsClean(%q) = %v, want nil (literal dots are not traversal)", in, err)
+			}
+			if got != filepath.Clean(in) {
+				t.Fatalf("validateAbsClean(%q) = %q, want %q", in, got, filepath.Clean(in))
+			}
+		}
+	})
+
 	t.Run("accepts_absolute_clean_path", func(t *testing.T) {
 		t.Parallel()
 		got, err := validateAbsClean("/tmp/test.txt")

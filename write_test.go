@@ -412,6 +412,19 @@ func TestWriteReader_EmptyReader(t *testing.T) {
 	}
 }
 
+func TestWriteReader_NilReader(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nilreader.txt")
+	if _, err := WriteReader(context.Background(), path, nil); err == nil {
+		t.Fatal("WriteReader(nil reader) = nil, want non-nil error")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Error("no target file should exist after nil-reader error")
+	}
+	assertNoTempLeak(t, dir)
+}
+
 func TestMkdirMode(t *testing.T) {
 	t.Parallel()
 

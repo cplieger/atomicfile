@@ -256,6 +256,9 @@ func (wc writerCtx) Write(p []byte) (int, error) {
 // single-shot sources). ctx is still honored at the durability barrier, so a
 // cancelled write leaves no partial target.
 func WriteReader(ctx context.Context, path string, r io.Reader, opts ...Option) (Result, error) {
+	if r == nil {
+		return Result{}, errors.New("atomicfile: nil reader")
+	}
 	return writeAtomic(ctx, path, buildCfg(opts), func(tmp *os.File) error {
 		if wt, ok := r.(io.WriterTo); ok {
 			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: tmp})
@@ -274,9 +277,10 @@ func WriteReader(ctx context.Context, path string, r io.Reader, opts ...Option) 
 type pendingState uint8
 
 const (
-	pendingOpen      pendingState = iota // not yet committed or cleaned up
-	pendingCommitted                     // Commit was attempted; result/err are cached
-	pendingCleaned                       // Cleanup removed the temp; Commit now fails
+	pendingOpen          pendingState = iota // not yet committed or cleaned up
+	pendingCommitted                         // Commit was attempted; result/err are cached
+	pendingCleaned                           // Cleanup removed the temp; Commit now fails
+	pendingCleanupFailed                     // Cleanup closed the temp but removal failed; Commit still fails and Cleanup retries removal
 )
 
 // PendingFile is a temp file open for writing, destined to atomically replace
@@ -334,7 +338,7 @@ func (p *PendingFile) Commit(ctx context.Context) (Result, error) {
 	switch p.state {
 	case pendingCommitted:
 		return p.result, p.err
-	case pendingCleaned:
+	case pendingCleaned, pendingCleanupFailed:
 		return Result{}, ErrAborted
 	}
 	p.state = pendingCommitted
@@ -363,21 +367,36 @@ func (p *PendingFile) commit(ctx context.Context) (Result, error) {
 
 // Cleanup closes and removes the temp file, aborting the pending write. It is a
 // no-op once Commit has been called — a successful Commit already moved the data
-// into place, and a failed Commit already removed the temp — and is idempotent
-// across repeated calls. After Cleanup, a subsequent Commit returns ErrAborted.
+// into place, and a failed Commit already removed the temp. After a successful
+// Cleanup, a subsequent Commit returns ErrAborted.
+//
+// If the temp removal fails (for a reason other than the file already being
+// gone), Cleanup returns that error WITHOUT marking the write cleaned, so a
+// later Cleanup retries the removal — a failed Cleanup never falsely reports the
+// temp gone, and a subsequent Commit still returns ErrAborted. Repeated Cleanup
+// calls are therefore a no-op after success but a retry after a removal failure.
 // Safe to defer immediately after NewPendingFile.
 func (p *PendingFile) Cleanup() error {
-	if p.state != pendingOpen {
+	switch p.state {
+	case pendingCommitted, pendingCleaned:
+		return nil
+	case pendingCleanupFailed:
+		if err := os.Remove(p.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		p.state = pendingCleaned
 		return nil
 	}
-	p.state = pendingCleaned
+	// pendingOpen: first cleanup attempt. Close the fd, then remove the temp.
 	tmpName := p.Name()
 	if clErr := p.Close(); clErr != nil {
 		p.cfg.logger.Debug("atomicfile: pending file close during cleanup failed",
 			"path", tmpName, "error", clErr)
 	}
 	if err := os.Remove(tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		p.state = pendingCleanupFailed
 		return err
 	}
+	p.state = pendingCleaned
 	return nil
 }

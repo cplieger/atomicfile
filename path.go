@@ -10,8 +10,12 @@ import (
 	"strings"
 )
 
-// validateAbsClean checks that path is non-empty, free of null bytes and ".."
-// traversal, and absolute, returning the cleaned form.
+// validateAbsClean requires path to be non-empty and null-byte-free and to
+// clean to an absolute path, returning the cleaned form. filepath.Clean
+// normalizes any ".." in an absolute path (there is nothing to escape), so
+// this is not a containment boundary: callers that need writes confined to a
+// directory tree use the *os.Root-backed APIs (WriteFileInRoot /
+// WriteReaderInRoot), which enforce containment.
 func validateAbsClean(path string) (string, error) {
 	if path == "" {
 		return "", ErrEmptyPath
@@ -22,11 +26,6 @@ func validateAbsClean(path string) (string, error) {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
 		return "", fmt.Errorf("%w: not absolute: %q", ErrUnsafePath, path)
-	}
-	if strings.Contains(clean, ".."+string(filepath.Separator)) ||
-		strings.HasSuffix(clean, string(filepath.Separator)+"..") ||
-		clean == ".." {
-		return "", fmt.Errorf("%w: contains traversal: %q", ErrUnsafePath, path)
 	}
 	return clean, nil
 }

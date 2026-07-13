@@ -65,6 +65,17 @@ func TestReadBoundedFile(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects_nil_file_without_panic", func(t *testing.T) {
+		t.Parallel()
+		got, err := ReadBoundedFile(context.Background(), nil, 1024)
+		if err == nil {
+			t.Fatalf("ReadBoundedFile(nil) = %v, want non-nil error", got)
+		}
+		if got != nil {
+			t.Errorf("ReadBoundedFile(nil) data = %q, want nil", got)
+		}
+	})
+
 	t.Run("does_not_close_caller_handle", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "twice.txt")

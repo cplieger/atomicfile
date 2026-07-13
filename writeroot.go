@@ -182,10 +182,45 @@ func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable
 	}
 	if syncErr := fsyncRootDir(root, dir); syncErr != nil {
 		c.logger.Warn("atomicfile: parent-directory fsync failed; write is not durable",
-			"path", name, "error", syncErr)
+			"root", root.Name(), "path", name, "error", syncErr)
 		return false, nil
 	}
 	return true, nil
+}
+
+// openTempForRoot runs the pre-barrier preamble for a root-confined write,
+// mirroring openTempForPath on the absolute-path side: it validates the
+// relative name, honors ctx, refuses a symlink target, optionally creates the
+// parent directory, and creates the temp file inside root. The guard sequence
+// (nil-root -> validateRootName -> ctx -> checkSymlinkInRoot -> mkdir ->
+// createTempInRoot) is the root-confinement contract and must not be reordered.
+// On any error it returns zero values and the error; on success it returns the
+// open temp file plus the cleaned name, parent dir, and root-relative temp name.
+func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (tmp *os.File, cleanName, dir, tmpName string, err error) {
+	if root == nil {
+		return nil, "", "", "", fmt.Errorf("%w: nil root", ErrUnsafePath)
+	}
+	cleanName, err = validateRootName(name)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, "", "", "", fmt.Errorf("atomicfile: %w", ctxErr)
+	}
+	if symErr := checkSymlinkInRoot(root, cleanName, c); symErr != nil {
+		return nil, "", "", "", symErr
+	}
+	dir = filepath.Dir(cleanName)
+	if c.mkdirMode != 0 {
+		if mkErr := root.MkdirAll(dir, c.mkdirMode); mkErr != nil {
+			return nil, "", "", "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
+		}
+	}
+	tmp, tmpName, err = createTempInRoot(root, dir)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	return tmp, cleanName, dir, tmpName, nil
 }
 
 // writeAtomicInRoot is the root-confined analogue of writeAtomic: validate the
@@ -195,26 +230,7 @@ func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable
 // the root commit. Every filesystem operation runs through the *os.Root, so a
 // symlink or ".." component can never cause a write outside root's tree.
 func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, writeData func(*os.File) error) (Result, error) {
-	if root == nil {
-		return Result{}, fmt.Errorf("%w: nil root", ErrUnsafePath)
-	}
-	cleanName, err := validateRootName(name)
-	if err != nil {
-		return Result{}, err
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return Result{}, fmt.Errorf("atomicfile: %w", ctxErr)
-	}
-	if symErr := checkSymlinkInRoot(root, cleanName, c); symErr != nil {
-		return Result{}, symErr
-	}
-	dir := filepath.Dir(cleanName)
-	if c.mkdirMode != 0 {
-		if mkErr := root.MkdirAll(dir, c.mkdirMode); mkErr != nil {
-			return Result{}, fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
-		}
-	}
-	tmp, tmpName, err := createTempInRoot(root, dir)
+	tmp, cleanName, dir, tmpName, err := openTempForRoot(ctx, root, name, c)
 	if err != nil {
 		return Result{}, err
 	}
@@ -248,7 +264,7 @@ func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, 
 // *os.Root and reading it with ReadBoundedFile. Mode defaults to 0o644
 // (override with WithMode). A nil error means the data is at name; check
 // Result.Durable for crash durability. Result.Path is root's directory joined
-// with the cleaned relative name.
+// with the cleaned relative name. A nil root returns ErrUnsafePath.
 func WriteFileInRoot(ctx context.Context, root *os.Root, name string, data []byte, opts ...Option) (Result, error) {
 	return writeAtomicInRoot(ctx, root, name, buildCfg(opts), func(tmp *os.File) error {
 		_, err := tmp.Write(data)
@@ -262,8 +278,14 @@ func WriteFileInRoot(ctx context.Context, root *os.Root, name string, data []byt
 // bypasses the per-Read context check, so cancellation is coarse (per-chunk for
 // chunked sources, post-copy for single-shot sources). ctx is still honored at
 // the durability barrier, so a cancelled write leaves no partial target. Mode
-// defaults to 0o644 (override with WithMode).
+// defaults to 0o644 (override with WithMode). A nil root returns ErrUnsafePath.
 func WriteReaderInRoot(ctx context.Context, root *os.Root, name string, r io.Reader, opts ...Option) (Result, error) {
+	if root == nil {
+		return Result{}, fmt.Errorf("%w: nil root", ErrUnsafePath)
+	}
+	if r == nil {
+		return Result{}, errors.New("atomicfile: nil reader")
+	}
 	return writeAtomicInRoot(ctx, root, name, buildCfg(opts), func(tmp *os.File) error {
 		if wt, ok := r.(io.WriterTo); ok {
 			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: tmp})

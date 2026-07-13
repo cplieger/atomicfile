@@ -166,6 +166,28 @@ func TestWriteReaderInRoot(t *testing.T) {
 		}
 		assertNoTempLeak(t, dir)
 	})
+
+	t.Run("rejects_nil_reader_and_leaves_no_target", func(t *testing.T) {
+		t.Parallel()
+		root, dir := openTestRoot(t)
+		if _, err := WriteReaderInRoot(context.Background(), root, "nilreader", nil); err == nil {
+			t.Fatal("WriteReaderInRoot(nil reader) = nil, want non-nil error")
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "nilreader")); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("target exists after nil-reader error: %v", statErr)
+		}
+		assertNoTempLeak(t, dir)
+	})
+
+	t.Run("nil_root_takes_precedence_over_nil_reader", func(t *testing.T) {
+		t.Parallel()
+		// Both root and reader are nil: the nil-root contract (ErrUnsafePath)
+		// must win over the nil-reader guard, matching writeAtomicInRoot's
+		// documented "A nil root returns ErrUnsafePath" behavior.
+		if _, err := WriteReaderInRoot(context.Background(), nil, "f", nil); !errors.Is(err, ErrUnsafePath) {
+			t.Fatalf("err = %v, want ErrUnsafePath", err)
+		}
+	})
 }
 
 // TestWriteInRoot_Confinement is the security heart of the seam: a name that
@@ -298,7 +320,8 @@ func TestWriteInRoot_CancelledContextLeavesNoTarget(t *testing.T) {
 func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	root, dir := openTestRoot(t)
-	res, err := WriteFileInRoot(context.Background(), root, "f", []byte("x"))
+	h := &captureHandler{}
+	res, err := WriteFileInRoot(context.Background(), root, "f", []byte("x"), WithLogger(slog.New(h)))
 	if err != nil {
 		t.Fatalf("WriteFileInRoot = %v; a post-rename fsync failure is not a hard error", err)
 	}
@@ -307,6 +330,30 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	}
 	// The data still landed despite the non-durable fsync.
 	assertContent(t, filepath.Join(dir, "f"), "x")
+	// The non-durable Warn must carry both root and path so an operator using
+	// multiple roots can identify which on-disk file is not durable.
+	var found bool
+	for _, r := range h.records {
+		if r.Level != slog.LevelWarn {
+			continue
+		}
+		var hasRoot, hasPath bool
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "root":
+				hasRoot = a.Value.String() == root.Name()
+			case "path":
+				hasPath = a.Value.String() == "f"
+			}
+			return true
+		})
+		if hasRoot && hasPath {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("non-durable Warn missing root=%q and path=%q attributes", root.Name(), "f")
+	}
 }
 
 // TestRandomTempName_ReapableShape ties the root-confined temp names to the
