@@ -42,10 +42,11 @@ preserve this ordering. In particular:
 - On any error before the rename, the temp file must be cleaned up
   (`removeTemp`). Don't leave orphans.
 - Paths are validated before any filesystem work: `validateAbsClean`
-  (absolute, no `..` traversal, no null bytes) for the package-level
-  writers, and `validateRootName` (relative, no null bytes; an internal
-  `..` that stays inside the tree is allowed, since the `*os.Root` itself
-  refuses any escape) for the `*os.Root`-confined writers.
+  (non-empty, null-byte-free, cleaned to an absolute path) for the
+  package-level writers, and `validateRootName` (relative, no null
+  bytes; an internal `..` that stays inside the tree is allowed, since
+  the `*os.Root` itself refuses any escape) for the `*os.Root`-confined
+  writers.
 
 The platform target is **Linux only** — `os.Rename` is not guaranteed
 atomic on Windows. Don't add Windows-specific rename code; see the
@@ -101,8 +102,8 @@ golangci-lint fmt
 
 ### Fuzzing
 
-The package ships several fuzz targets across `fuzz_test.go` and
-`fuzz_extended_test.go`. Run one at a time with a time budget:
+The package ships nine fuzz targets in `atomicfile_fuzz_test.go`. Run one at a
+time with a time budget:
 
 ```sh
 go test -run='^$' -fuzz=FuzzWriteFile -fuzztime=30s .
@@ -111,9 +112,9 @@ go test -run='^$' -fuzz=FuzzWriteFile -fuzztime=30s .
 Available targets:
 
 - `FuzzWriteFile`, `FuzzWriteReader`, `FuzzReadBounded`,
-  `FuzzValidateAbsClean`, `FuzzValidateRootName` (`fuzz_test.go`)
+  `FuzzValidateAbsClean`, `FuzzValidateRootName`
 - `FuzzIsStaleTempName`, `FuzzPendingFileRoundTrip`,
-  `FuzzCleanupStaleTemps`, `FuzzWriteFileInRoot` (`fuzz_extended_test.go`)
+  `FuzzCleanupStaleTemps`, `FuzzWriteFileInRoot`
 
 New parsing or path-handling logic should come with a fuzz target or an
 added seed corpus entry.
@@ -133,16 +134,20 @@ gremlins unleash .
 Tests live beside the code (standard Go layout) but split by intent — match
 the right file when adding cases:
 
-- `atomicfile_test.go` — core table-driven unit tests.
+- `write_test.go`, `read_test.go`, `read_boundedfile_test.go`, `path_test.go`,
+  `write_pendingfile_test.go`, `write_preserve_test.go`, `cleanup_test.go`,
+  `errors_test.go` — per-concern table-driven unit tests (write paths, bounded
+  reads via `ReadBounded` and the `*os.Root`-confined `ReadBoundedFile` seam,
+  path validation,
+  `NewPendingFile` / `Commit`, mode/ownership preservation, temp-cleanup, and
+  `*WriteError` / `WritePhase` tagging), plus failure-injection and edge-case
+  hardening (erroring readers, temp-cleanup races, symlink refusal).
+- `options_test.go` — guards for variadic `Option` handling, including `nil`
+  options interleaved with real ones (`buildCfg` skips nils, and the suite
+  enforces it).
 - `atomicfile_prop_test.go` — property tests via `pgregory.net/rapid` (the
   one external dependency, test-only).
-- `fuzz_test.go`, `fuzz_extended_test.go` — fuzz targets (see above).
-- `adversarial_test.go`, `redteam_refactor_test.go`, `round3_test.go` —
-  failure-injection and edge-case hardening (erroring readers, temp-cleanup
-  races, symlink refusal).
-- `convergence_test.go`, `niloption_test.go` — guards for variadic
-  `Option` handling, including `nil` options interleaved with real ones
-  (`buildCfg` skips nils, and the suite enforces it).
+- `atomicfile_fuzz_test.go` — fuzz targets (see above).
 - `dirsync_test.go` — parent-dir fsync durability (`Result.Durable`
   propagation) through every durable entry point via the `fsyncDir` seam.
 - `writeroot_test.go` — the `*os.Root`-confined writers (`WriteFileInRoot` /
@@ -155,14 +160,15 @@ the right file when adding cases:
 - `helpers_test.go` — shared test helpers (`isWindows`, `assertNoTempLeak`,
   `stubFsyncDir`, `stubOsChown`, `plainReader`, capture-handler logging,
   `seqCancelCtx`, ...).
-- `example_test.go`, `readme_example_test.go` — runnable `Example`
-  functions and the README snippet, kept compiling.
-- `benchmark_test.go` — allocation/throughput benchmarks.
+- `example_test.go` — runnable `Example` functions and the README snippet,
+  kept compiling.
+- `atomicfile_bench_test.go` — allocation/throughput benchmarks.
 
-When you add an `Option` or a new entry point, extend the convergence and
-dir-sync suites so the nil-option guard and `Result.Durable` propagation stay
-covered for the new surface — and, for a new `*os.Root`-confined entry point,
-add the matching confinement and `fsyncRootDir` cases to `writeroot_test.go`.
+When you add an `Option` or a new entry point, extend the option and dir-sync
+suites (`options_test.go`, `dirsync_test.go`) so the nil-option guard and
+`Result.Durable` propagation stay covered for the new surface — and, for a new
+`*os.Root`-confined entry point, add the matching confinement and
+`fsyncRootDir` cases to `writeroot_test.go`.
 
 ## Commits and PRs
 

@@ -9,7 +9,7 @@
 
 > Crash-safe atomic file writes for Go
 
-A standalone Go library providing atomic file writes (temp→fsync→rename→dir-fsync), path-traversal validation, bounded reads, and streaming writes. Standard-library only, no external runtime dependencies.
+A standalone Go library providing atomic file writes (temp→fsync→rename→dir-fsync), path cleaning with `os.Root`-based containment for the `*InRoot` APIs, bounded reads, and streaming writes. Standard-library only, no external runtime dependencies.
 
 ## Platform Support
 
@@ -147,10 +147,12 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | Sentinel           | Meaning                                                                         |
 | ------------------ | ------------------------------------------------------------------------------- |
 | `ErrEmptyPath`     | The path argument was empty                                                     |
-| `ErrUnsafePath`    | The path failed the local safety check (relative, null byte, or `..` traversal) |
+| `ErrUnsafePath`    | The path is not absolute or contains a null byte                                |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit                                  |
 | `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write       |
+
+The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.
 
 Failures in the write barrier (create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. Pre-barrier failures are returned as their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All remain inspectable with `errors.Is` / `errors.As`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
 
