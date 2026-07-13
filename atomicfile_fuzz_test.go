@@ -61,31 +61,32 @@ func FuzzReadBounded(f *testing.F) {
 	f.Add([]byte{}, int64(1))
 	f.Add([]byte("\x00\xff"), int64(1))
 
-	baseDir := f.TempDir()
 	ctx := context.Background()
 
 	f.Fuzz(func(t *testing.T, content []byte, maxBytes int64) {
 		if maxBytes < 0 {
 			maxBytes = 0
 		}
-		path := filepath.Join(baseDir, "fuzz_read.dat")
+		path := filepath.Join(t.TempDir(), "fuzz_read.dat")
 		if err := os.WriteFile(path, content, 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 
+		// The harness always writes a valid absolute path, so the only
+		// behaviorally acceptable outcomes are an exact read when the file
+		// fits within maxBytes or ErrFileTooLarge when it does not.
 		got, err := ReadBounded(ctx, path, maxBytes)
-		if err != nil {
-			if maxBytes < int64(len(content)) && errors.Is(err, ErrFileTooLarge) {
-				return
+		if int64(len(content)) > maxBytes {
+			if !errors.Is(err, ErrFileTooLarge) {
+				t.Fatalf("ReadBounded(%d bytes, max %d) = %v, want ErrFileTooLarge", len(content), maxBytes, err)
 			}
-			// Other errors (e.g. path validation) are acceptable; panics are not.
 			return
 		}
-		if int64(len(got)) > maxBytes {
-			t.Fatalf("result length %d exceeds maxBytes %d", len(got), maxBytes)
+		if err != nil {
+			t.Fatalf("ReadBounded(%d bytes, max %d) = %v, want nil", len(content), maxBytes, err)
 		}
-		if maxBytes >= int64(len(content)) && !bytes.Equal(got, content) {
-			t.Fatalf("content mismatch when maxBytes >= len(content)")
+		if !bytes.Equal(got, content) {
+			t.Fatalf("ReadBounded(%d bytes, max %d) returned different content", len(content), maxBytes)
 		}
 	})
 }
@@ -99,20 +100,38 @@ func FuzzValidateAbsClean(f *testing.F) {
 	f.Add("/..")
 
 	f.Fuzz(func(t *testing.T, path string) {
+		// Encode the acceptance/rejection oracle for CURRENT behavior: reject
+		// empty and null-bearing inputs, reject anything that does not clean to
+		// an absolute path, and reject a cleaned path that still holds a ".."
+		// segment. Scanning segments of wantClean (not the raw input) tracks the
+		// production post-Clean traversal check.
+		wantErr := path == "" || strings.ContainsRune(path, 0)
+		wantClean := ""
+		if !wantErr {
+			wantClean = filepath.Clean(path)
+			if !filepath.IsAbs(wantClean) {
+				wantErr = true
+			}
+			for seg := range strings.SplitSeq(wantClean, string(filepath.Separator)) {
+				if seg == ".." {
+					wantErr = true
+					break
+				}
+			}
+		}
+
 		clean, err := validateAbsClean(path)
-		if err != nil {
+		if wantErr {
+			if err == nil {
+				t.Fatalf("validateAbsClean(%q) = %q, nil error; want rejection", path, clean)
+			}
 			return
 		}
-		if !filepath.IsAbs(clean) {
-			t.Fatalf("returned path is not absolute: %q", clean)
+		if err != nil {
+			t.Fatalf("validateAbsClean(%q) = error %v, want nil", path, err)
 		}
-		if strings.Contains(clean, "\x00") {
-			t.Fatalf("returned path contains null byte: %q", clean)
-		}
-		for seg := range strings.SplitSeq(clean, string(filepath.Separator)) {
-			if seg == ".." {
-				t.Fatalf("returned path contains '..' segment: %q", clean)
-			}
+		if clean != wantClean {
+			t.Fatalf("validateAbsClean(%q) = %q, want %q", path, clean, wantClean)
 		}
 	})
 }
@@ -164,21 +183,29 @@ func FuzzValidateRootName(f *testing.F) {
 	f.Add("nested/deep/file")
 
 	f.Fuzz(func(t *testing.T, name string) {
+		// Encode the acceptance/rejection oracle for CURRENT validateRootName
+		// behavior: reject empty, null-bearing, and absolute names; otherwise
+		// accept and return the cleaned relative form. An internal ".." that
+		// stays inside the tree is allowed (the *os.Root refuses escapes at
+		// operation time), so it is NOT a rejection here.
+		wantErr := name == "" || strings.ContainsRune(name, 0) || filepath.IsAbs(name)
+		wantClean := filepath.Clean(name)
+
 		clean, err := validateRootName(name)
-		if err != nil {
+		if wantErr {
+			if err == nil {
+				t.Fatalf("validateRootName(%q) = %q, nil error; want rejection", name, clean)
+			}
 			return
 		}
-		if clean == "" {
-			t.Fatalf("validateRootName(%q) = %q with nil error, want non-empty", name, clean)
+		if err != nil {
+			t.Fatalf("validateRootName(%q) = error %v, want nil", name, err)
+		}
+		if clean != wantClean {
+			t.Fatalf("validateRootName(%q) = %q, want cleaned form %q", name, clean, wantClean)
 		}
 		if filepath.IsAbs(clean) {
 			t.Fatalf("validateRootName(%q) = %q, want a relative path", name, clean)
-		}
-		if strings.ContainsRune(clean, 0) {
-			t.Fatalf("validateRootName(%q) = %q, want no null byte", name, clean)
-		}
-		if got := filepath.Clean(clean); got != clean {
-			t.Fatalf("validateRootName(%q) = %q, want cleaned form %q", name, clean, got)
 		}
 	})
 }

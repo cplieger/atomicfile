@@ -529,3 +529,103 @@ func TestPendingFile_Cleanup_SuccessReturnsNil(t *testing.T) {
 		t.Fatalf("Cleanup() left temp %q: Stat err = %v, want ErrNotExist", tmpName, statErr)
 	}
 }
+
+// TestPendingFile_Cleanup_RetriesAfterRemoveFailure pins the pendingCleanupFailed
+// retry semantics: when the first Cleanup's os.Remove fails (ENOTEMPTY), Cleanup
+// returns the error and does NOT falsely mark the write cleaned, so Commit still
+// aborts and a later Cleanup retries the removal once the obstruction clears. A
+// regression to the old "mark cleaned before remove" behavior would make the
+// second Cleanup a silent no-op and leak the temp. Replacing the temp with a
+// NON-EMPTY directory triggers ENOTEMPTY, which root cannot bypass, so this holds
+// even when the suite runs as root.
+func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "retry.txt")
+
+	pf, err := NewPendingFile(context.Background(), target)
+	if err != nil {
+		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
+	}
+	tmpName := pf.Name()
+
+	// Swap the temp for a non-empty directory so the first os.Remove fails.
+	replaceWithNonEmptyDir(t, tmpName)
+
+	firstErr := pf.Cleanup()
+	if firstErr == nil {
+		t.Fatalf("first Cleanup (os.Remove hits non-empty dir) = nil, want non-nil error")
+	}
+	if errors.Is(firstErr, fs.ErrNotExist) {
+		t.Fatalf("first Cleanup = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", firstErr)
+	}
+
+	// A failed Cleanup must NOT falsely mark the write cleaned: Commit still
+	// aborts because nothing reached the final path.
+	if _, commitErr := pf.Commit(context.Background()); !errors.Is(commitErr, ErrAborted) {
+		t.Fatalf("Commit after a failed Cleanup = %v, want ErrAborted", commitErr)
+	}
+
+	// Clearing the obstruction lets a second Cleanup retry the removal and
+	// succeed. The old (mark-cleaned-before-remove) behavior would make this a
+	// silent no-op and leak the directory left at tmpName.
+	if err := os.Remove(filepath.Join(tmpName, "child")); err != nil {
+		t.Fatalf("clear obstruction: %v", err)
+	}
+	if secondErr := pf.Cleanup(); secondErr != nil {
+		t.Fatalf("second Cleanup (retry) = %v, want nil", secondErr)
+	}
+	if _, statErr := os.Stat(tmpName); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("temp %q still present after retry Cleanup, want removed (no leak)", tmpName)
+	}
+}
+
+// TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure pins
+// the retry-failure branch of the pendingCleanupFailed state: a first Cleanup
+// fails (ENOTEMPTY), a SECOND Cleanup while the temp is still obstructed also
+// fails and MUST keep the write in a retryable (not falsely-cleaned) state, so
+// Commit still aborts; only after the obstruction clears does a third Cleanup
+// succeed and remove the temp. A regression that marks the write cleaned on the
+// second failed removal would make the third Cleanup a silent no-op and leak the
+// temp directory. Replacing the temp with a NON-EMPTY directory triggers
+// ENOTEMPTY, which root cannot bypass, so this holds even when run as root.
+func TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "retry-still-blocked.txt")
+
+	pf, err := NewPendingFile(context.Background(), target)
+	if err != nil {
+		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
+	}
+	tmpName := pf.Name()
+
+	replaceWithNonEmptyDir(t, tmpName)
+
+	firstErr := pf.Cleanup()
+	if firstErr == nil {
+		t.Fatalf("first Cleanup (os.Remove hits non-empty dir) = nil, want non-nil error")
+	}
+	if errors.Is(firstErr, fs.ErrNotExist) {
+		t.Fatalf("first Cleanup = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", firstErr)
+	}
+
+	secondErr := pf.Cleanup()
+	if secondErr == nil {
+		t.Fatalf("second Cleanup while temp is still a non-empty dir = nil, want non-nil error")
+	}
+	if errors.Is(secondErr, fs.ErrNotExist) {
+		t.Fatalf("second Cleanup = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", secondErr)
+	}
+	if _, commitErr := pf.Commit(context.Background()); !errors.Is(commitErr, ErrAborted) {
+		t.Fatalf("Commit after repeated failed Cleanup = %v, want ErrAborted", commitErr)
+	}
+
+	if err := os.Remove(filepath.Join(tmpName, "child")); err != nil {
+		t.Fatalf("clear obstruction: %v", err)
+	}
+	if thirdErr := pf.Cleanup(); thirdErr != nil {
+		t.Fatalf("third Cleanup (retry after obstruction clears) = %v, want nil", thirdErr)
+	}
+	if _, statErr := os.Stat(tmpName); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("temp %q still present after third Cleanup, want removed (no leak)", tmpName)
+	}
+}

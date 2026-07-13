@@ -2,6 +2,7 @@ package atomicfile
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -86,6 +87,31 @@ func reapStaleTemp(dir string, e os.DirEntry, cutoff time.Time, logger *slog.Log
 	return true, false
 }
 
+// reapDir drains an open directory handle in batches, invoking
+// reapStaleTemp on each entry, and returns the count removed and the
+// count that failed. io.EOF is the normal terminal signal, not an
+// error; any other readdir error is returned.
+func reapDir(d *os.File, dir string, cutoff time.Time, logger *slog.Logger) (removed, failed int, err error) {
+	for {
+		entries, readErr := d.ReadDir(128)
+		for _, e := range entries {
+			didRemove, didFail := reapStaleTemp(dir, e, cutoff, logger)
+			if didRemove {
+				removed++
+			}
+			if didFail {
+				failed++
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return removed, failed, nil
+		}
+		if readErr != nil {
+			return removed, failed, readErr
+		}
+	}
+}
+
 // CleanupStaleTemps removes temp files in dir that this package created
 // (".atomicfile-<digits>.tmp") and whose mtime is older than maxAge. It returns
 // the number removed. A missing dir is not an error. Best-effort per file:
@@ -98,23 +124,19 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 			"dir", dir, "max_age", maxAge)
 		return 0, nil
 	}
-	entries, rdErr := os.ReadDir(dir)
+	d, rdErr := os.Open(dir)
 	if rdErr != nil {
 		if errors.Is(rdErr, fs.ErrNotExist) {
 			return 0, nil
 		}
 		return 0, rdErr
 	}
+	defer d.Close()
+
 	cutoff := time.Now().Add(-maxAge)
-	failed := 0
-	for _, e := range entries {
-		didRemove, didFail := reapStaleTemp(dir, e, cutoff, c.logger)
-		if didRemove {
-			removed++
-		}
-		if didFail {
-			failed++
-		}
+	removed, failed, err := reapDir(d, dir, cutoff, c.logger)
+	if err != nil {
+		return removed, err
 	}
 	if removed > 0 {
 		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temps", "dir", dir, "count", removed)
