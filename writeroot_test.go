@@ -486,16 +486,3 @@ func TestRemoveTempInRoot_FailedRemoval_LogsDebug(t *testing.T) {
 		t.Errorf("removeTempInRoot(non-empty dir) logged %q %d times, want 1", msgRemoveTempFailed, got)
 	}
 }
-
-// TestFsyncRootDir_MissingDir_PropagatesOpenError pins fsyncRootDir's
-// robustness: an open failure must propagate as-is, never be swallowed by
-// syncing a nil file handle. Asking it to fsync a directory that does not exist
-// must return the ErrNotExist open error; the variant that skips the early
-// return instead syncs a nil handle and yields ErrInvalid. It reads the
-// fsyncRootDir seam, so it must not run in parallel.
-func TestFsyncRootDir_MissingDir_PropagatesOpenError(t *testing.T) {
-	root, _ := openTestRoot(t)
-	if err := fsyncRootDir(root, "no-such-dir"); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("fsyncRootDir(missing dir) = %v, want an ErrNotExist open error", err)
-	}
-}

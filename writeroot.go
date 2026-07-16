@@ -37,8 +37,9 @@ func validateRootName(name string) (string, error) {
 
 // randomTempName returns a temp base name of the exact shape CleanupStaleTemps
 // recognises (".atomicfile-<digits>.tmp"), drawing the digit run from
-// crypto/rand. Matching os.CreateTemp's name shape keeps root-confined temps
-// reapable by the same stale-temp sweep as every other temp this package makes.
+// crypto/rand. Every temp this package creates — absolute-path entry points
+// included, since they adapt onto this engine — carries this one name shape,
+// so a single stale-temp sweep reaps every orphan.
 func randomTempName() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -69,20 +70,19 @@ func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
 	}
 }
 
-// checkSymlinkInRoot refuses a symlink target by default, mirroring the
-// absolute-path write contract, unless WithAllowSymlinkTarget was set. A
-// missing target is fine. Because the eventual rename replaces the final name
-// rather than following it, the worst case under a racing attacker who plants a
-// symlink is replacing that link — and an *os.Root forbids the link from
-// pointing outside the tree regardless.
+// checkSymlinkInRoot refuses a symlink target by default, unless
+// WithAllowSymlinkTarget was set. A missing target is fine. Because the
+// eventual rename replaces the final name rather than following it, the worst
+// case under a racing attacker who plants a symlink is replacing that link —
+// and an *os.Root forbids the link from pointing outside the tree regardless.
 //
-// As with the absolute-path checkSymlink, WithPreserveMode and
-// WithPreserveOwnership read the target via a symlink-following
-// root.Stat (resolveModeInRoot / applyOwnershipInRoot), so within
-// this window a symlink planted inside the root can influence the
-// result file's mode or owner -- never its content, location, or
-// anything outside the root. Keep the directory non-attacker-writable
-// to close the window entirely.
+// WithPreserveMode and WithPreserveOwnership read the target via a
+// symlink-following root.Stat (resolveModeInRoot / applyOwnershipInRoot), so
+// within this window a symlink planted inside the root can influence the
+// result file's mode or owner -- never its content, location, or anything
+// outside the root (root.Stat refuses absolute and root-escaping link
+// targets). Keep the directory non-attacker-writable to close the window
+// entirely.
 func checkSymlinkInRoot(root *os.Root, name string, c *cfg) error {
 	if c.allowSymlinkTarget {
 		return nil
@@ -100,9 +100,9 @@ func checkSymlinkInRoot(root *os.Root, name string, c *cfg) error {
 	return nil
 }
 
-// resolveModeInRoot mirrors resolveMode for a confined write: honor
-// WithPreserveMode by reusing the target's current permission, falling back to
-// the configured mode when the target is absent or cannot be stat-ed.
+// resolveModeInRoot determines the mode to apply: honor WithPreserveMode by
+// reusing the target's current permission, falling back to the configured mode
+// when the target is absent or cannot be stat-ed.
 func resolveModeInRoot(root *os.Root, name string, c *cfg) os.FileMode {
 	if c.preserveMode {
 		fi, err := root.Stat(name)
@@ -117,11 +117,19 @@ func resolveModeInRoot(root *os.Root, name string, c *cfg) os.FileMode {
 	return c.mode
 }
 
-// applyOwnershipInRoot mirrors applyOwnership for a confined write: when
-// WithPreserveOwnership is set, chown the temp to the target's uid/gid. No-op
-// when the target is absent or its FileInfo.Sys() is not a *syscall.Stat_t.
-// Best-effort: a failed chown is logged at Warn and the write proceeds with the
-// writer's ownership; it never aborts the write.
+// rootChown changes the ownership of a name inside root. It is a package var
+// so tests can inject a chown failure; a real EPERM is impractical to force
+// from a same-owner test (and root cannot fail it at all). Production never
+// reassigns it.
+var rootChown = func(root *os.Root, name string, uid, gid int) error {
+	return root.Chown(name, uid, gid)
+}
+
+// applyOwnershipInRoot preserves the target's ownership on the staged temp:
+// when WithPreserveOwnership is set, chown the temp to the target's uid/gid.
+// No-op when the target is absent or its FileInfo.Sys() is not a
+// *syscall.Stat_t. Best-effort: a failed chown is logged at Warn and the write
+// proceeds with the writer's ownership; it never aborts the write.
 func applyOwnershipInRoot(root *os.Root, tmpName, target string, c *cfg) {
 	if !c.preserveOwnership {
 		return
@@ -138,16 +146,16 @@ func applyOwnershipInRoot(root *os.Root, tmpName, target string, c *cfg) {
 	if !ok {
 		return
 	}
-	if err := root.Chown(tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
+	if err := rootChown(root, tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
 		c.logger.Warn("atomicfile: preserve-ownership chown failed; keeping writer ownership",
 			"target", target, "uid", stat.Uid, "gid", stat.Gid, "error", err)
 	}
 }
 
 // fsyncRootDir fsyncs a directory inside root so a prior rename survives a
-// crash. It is a package var so tests can inject a failure, mirroring fsyncDir;
-// a real directory fsync is impractical to fail on a healthy filesystem.
-// Production never reassigns it.
+// crash. It is a package var so tests can inject a failure; a real directory
+// fsync is impractical to fail on a healthy filesystem. Production never
+// reassigns it.
 var fsyncRootDir = func(root *os.Root, dir string) error {
 	d, err := root.Open(dir)
 	if err != nil {
@@ -167,10 +175,12 @@ func removeTempInRoot(root *os.Root, tmpName string, logger *slog.Logger) {
 
 // commitTempInRoot finalizes a synced, closed temp file inside root: apply
 // ownership, atomically rename it to name, then fsync the parent directory. It
-// is the root-confined analogue of commitTemp. A pre-rename failure removes the
-// temp and returns an error (the data did not land). Once the rename succeeds
-// the data is at name; a subsequent parent-dir fsync failure is logged at Warn
-// and reported as durable=false with a nil error, never a hard failure.
+// is the single commit-side barrier — every write entry point (absolute-path
+// adapters included) commits through it, so a barrier change lands here and
+// nowhere else. A pre-rename failure removes the temp and returns an error
+// (the data did not land). Once the rename succeeds the data is at name; a
+// subsequent parent-dir fsync failure is logged at Warn and reported as
+// durable=false with a nil error, never a hard failure.
 func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable bool, err error) {
 	applyOwnershipInRoot(root, tmpName, name, c)
 	if rnErr := root.Rename(tmpName, name); rnErr != nil {
@@ -188,12 +198,12 @@ func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable
 	return true, nil
 }
 
-// openTempForRoot runs the pre-barrier preamble for a root-confined write,
-// mirroring openTempForPath on the absolute-path side: it validates the
-// relative name, honors ctx, refuses a symlink target, optionally creates the
-// parent directory, and creates the temp file inside root. The guard sequence
-// (nil-root -> validateRootName -> ctx -> checkSymlinkInRoot -> mkdir ->
-// createTempInRoot) is the root-confinement contract and must not be reordered.
+// openTempForRoot runs the pre-barrier preamble for every write: it validates
+// the relative name, honors ctx, refuses a symlink target, optionally creates
+// the parent directory, and creates the temp file inside root. It is the
+// single place that enforces the pre-write guard contract; add new pre-write
+// checks here. The guard sequence (nil-root -> validateRootName -> ctx ->
+// checkSymlinkInRoot -> mkdir -> createTempInRoot) must not be reordered.
 // On any error it returns zero values and the error; on success it returns the
 // open temp file plus the cleaned name, parent dir, and root-relative temp name.
 func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (tmp *os.File, cleanName, dir, tmpName string, err error) {
@@ -223,12 +233,15 @@ func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (t
 	return tmp, cleanName, dir, tmpName, nil
 }
 
-// writeAtomicInRoot is the root-confined analogue of writeAtomic: validate the
-// relative name, honor ctx, refuse symlink targets, optionally create the
-// parent directory, create the temp inside root, run the caller's writeData
-// step, then hand off to the shared temp-side barrier (finalizeTempFile) and
-// the root commit. Every filesystem operation runs through the *os.Root, so a
-// symlink or ".." component can never cause a write outside root's tree.
+// writeAtomicInRoot is the write engine: validate the relative name, honor
+// ctx, refuse symlink targets, optionally create the parent directory, create
+// the temp inside root, run the caller's writeData step, then hand off to the
+// temp-side barrier (finalizeTempFile) and the commit-side barrier
+// (commitTempInRoot). Every write entry point runs through it — the *InRoot
+// functions directly, the absolute-path functions via an *os.Root of the
+// target's parent (see writeAtomic). Every filesystem operation runs through
+// the *os.Root, so a symlink or ".." component can never cause a write outside
+// root's tree.
 func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, writeData func(*os.File) error) (Result, error) {
 	tmp, cleanName, dir, tmpName, err := openTempForRoot(ctx, root, name, c)
 	if err != nil {
@@ -294,4 +307,22 @@ func WriteReaderInRoot(ctx context.Context, root *os.Root, name string, r io.Rea
 		_, err := io.Copy(tmp, readerCtx{ctx: ctx, r: r})
 		return err
 	})
+}
+
+// NewPendingFileInRoot creates a temp file destined to atomically replace
+// name, a path relative to root, with the same confinement as WriteFileInRoot:
+// every filesystem operation (temp creation, rename, parent-dir fsync,
+// removal) runs through the *os.Root, so a symlink or ".." component in name
+// can never touch anything outside root's tree. Write to the returned
+// PendingFile, then call Commit to finalize or Cleanup to abort; the lifecycle
+// (idempotent Commit, ErrAborted after Cleanup, retryable failed Cleanup) is
+// identical to NewPendingFile. Mode defaults to 0o644 (override with
+// WithMode). ctx is checked before the temp is created. A nil root returns
+// ErrUnsafePath.
+//
+// The caller owns root and must keep it open for the PendingFile's lifetime
+// (through Commit or Cleanup); the PendingFile never closes a caller-provided
+// root. Result.Path is root's directory joined with the cleaned relative name.
+func NewPendingFileInRoot(ctx context.Context, root *os.Root, name string, opts ...Option) (*PendingFile, error) {
+	return newPendingFromRoot(ctx, root, name, false, buildCfg(opts))
 }
