@@ -393,3 +393,110 @@ func TestCleanupStaleTemps_NothingRemoved_DoesNotLogInfo(t *testing.T) {
 		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
 	}
 }
+
+// TestReapStaleTemp_RevalidatesBeforeRemove pins the TOCTOU repair: the reap
+// decision must come from a fresh os.Lstat immediately before the unlink, not
+// from the readdir-cached DirEntry info. A temp-shaped name whose file was
+// replaced AFTER the directory scan — the cached entry says stale, the disk
+// says fresh — must be spared, because the fresh file is someone's in-flight
+// write, not the scanned orphan.
+func TestReapStaleTemp_RevalidatesBeforeRemove(t *testing.T) {
+	t.Parallel()
+
+	t.Run("freshened_file_is_spared", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		name := ".atomicfile-424242.tmp"
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("orphan"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+
+		// Scan while the file is stale: the DirEntry's cached info says old.
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("entries = %d, want 1", len(entries))
+		}
+		// Simulate the race: the name is replaced by a fresh in-flight temp
+		// between the scan and this entry's reap turn.
+		now := time.Now()
+		if err := os.Chtimes(p, now, now); err != nil {
+			t.Fatalf("Chtimes(fresh): %v", err)
+		}
+
+		didRemove, didFail := reapStaleTemp(dir, entries[0], time.Now().Add(-time.Hour), slog.Default())
+		if didRemove || didFail {
+			t.Errorf("reapStaleTemp(freshened file) = (%v, %v), want (false, false)", didRemove, didFail)
+		}
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("freshened file was removed: %v (the fresh Lstat gate must spare it)", statErr)
+		}
+	})
+
+	t.Run("file_replaced_by_dir_is_spared", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		name := ".atomicfile-434343.tmp"
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("orphan"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		// Replace the regular file with a directory of the same name after the
+		// scan; the fresh Lstat must see the non-regular entry and spare it.
+		if err := os.Remove(p); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+		if err := os.Mkdir(p, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("Chtimes(dir): %v", err)
+		}
+
+		didRemove, didFail := reapStaleTemp(dir, entries[0], time.Now().Add(-time.Hour), slog.Default())
+		if didRemove || didFail {
+			t.Errorf("reapStaleTemp(replaced by dir) = (%v, %v), want (false, false)", didRemove, didFail)
+		}
+		if fi, statErr := os.Stat(p); statErr != nil || !fi.IsDir() {
+			t.Errorf("directory at temp-shaped name was altered (stat err=%v)", statErr)
+		}
+	})
+
+	t.Run("vanished_file_is_a_silent_skip", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		name := ".atomicfile-454545.tmp"
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("orphan"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+
+		didRemove, didFail := reapStaleTemp(dir, entries[0], time.Now(), slog.Default())
+		if didRemove || didFail {
+			t.Errorf("reapStaleTemp(vanished file) = (%v, %v), want (false, false)", didRemove, didFail)
+		}
+	})
+}

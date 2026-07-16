@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// tempPattern is the single os.CreateTemp pattern used for every temp file.
-// The "*" is replaced with a decimal random string, so each temp matches
-// tempPrefix + <digits> + tempSuffix exactly.
+// tempPrefix and tempSuffix bound the single temp-name shape used for every
+// temp file this package creates: tempPrefix + <decimal digits> + tempSuffix
+// (the digits come from randomTempName's crypto/rand draw). CleanupStaleTemps
+// reclaims exactly that shape and nothing else.
 const (
-	tempPattern = ".atomicfile-*.tmp"
-	tempPrefix  = ".atomicfile-"
-	tempSuffix  = ".tmp"
+	tempPrefix = ".atomicfile-"
+	tempSuffix = ".tmp"
 )
 
 // isAllDigits reports whether s is non-empty and all ASCII decimal digits —
-// the shape of os.CreateTemp's random suffix.
+// the shape of randomTempName's random middle.
 func isAllDigits(s string) bool {
 	if s == "" {
 		return false
@@ -36,9 +36,9 @@ func isAllDigits(s string) bool {
 
 // isStaleTempName reports whether name is one this package created:
 // ".atomicfile-<digits>.tmp", with a non-empty all-digit middle. The digit
-// requirement mirrors os.CreateTemp's decimal suffix exactly, so a caller-owned
-// file that merely shares the prefix and suffix (e.g. ".atomicfile-notes.tmp")
-// is never matched and never deleted.
+// requirement mirrors randomTempName's decimal middle exactly, so a
+// caller-owned file that merely shares the prefix and suffix (e.g.
+// ".atomicfile-notes.tmp") is never matched and never deleted.
 func isStaleTempName(name string) bool {
 	if !strings.HasPrefix(name, tempPrefix) || !strings.HasSuffix(name, tempSuffix) {
 		return false
@@ -55,28 +55,34 @@ func isStaleTempName(name string) bool {
 // one of the two is ever true; a non-matching, non-regular, or too-recent entry
 // returns (false, false).
 //
-// os.CreateTemp only ever makes regular files, so a directory or symlink that
-// merely shares the temp-name shape is skipped: never reclaim it. The IsRegular
-// check reuses the e.Info() lstat (also needed for the mtime check); e.Type()
-// would be equally authoritative since os.ReadDir resolves a DT_UNKNOWN d_type
-// via an eager lstat.
+// The reap decision comes from a fresh os.Lstat taken immediately before the
+// unlink, NOT from the readdir-cached e.Info(): if the name was replaced
+// between the directory scan and this entry's turn — e.g. an in-flight write
+// created a fresh temp under the same random name — the fresh mtime fails the
+// age gate and the entry is spared. POSIX offers no conditional unlink, so the
+// lstat→remove window cannot be closed entirely; keeping the two calls
+// adjacent makes it as small as portably possible.
+//
+// The package only ever makes regular-file temps, so a directory or symlink
+// that merely shares the temp-name shape is skipped via the same fresh lstat:
+// never reclaim it.
 func reapStaleTemp(dir string, e os.DirEntry, cutoff time.Time, logger *slog.Logger) (didRemove, didFail bool) {
 	name := e.Name()
 	if !isStaleTempName(name) {
 		return false, false
 	}
-	info, infErr := e.Info()
-	if infErr != nil {
-		if errors.Is(infErr, fs.ErrNotExist) {
+	full := filepath.Join(dir, name)
+	info, statErr := os.Lstat(full)
+	if statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
 			return false, false
 		}
-		logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", infErr)
+		logger.Debug("atomicfile.CleanupStaleTemps: stat failed", "name", name, "error", statErr)
 		return false, true
 	}
 	if !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
 		return false, false
 	}
-	full := filepath.Join(dir, name)
 	if rmErr := os.Remove(full); rmErr != nil {
 		if errors.Is(rmErr, fs.ErrNotExist) {
 			return false, false
