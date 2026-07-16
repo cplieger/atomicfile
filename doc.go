@@ -17,7 +17,14 @@
 // # Temp files
 //
 // Every temp file this package creates is named ".atomicfile-<digits>.tmp"
-// (os.CreateTemp replaces the pattern's "*" with a decimal random string).
-// CleanupStaleTemps reclaims orphaned temps of exactly that shape and nothing
-// else, so it never deletes a caller-owned file.
+// (the digits are a crypto/rand decimal string). CleanupStaleTemps reclaims
+// orphaned temps of exactly that shape and nothing else, so it never deletes
+// a caller-owned file.
+//
+// # Confinement
+//
+// Every write runs through an *os.Root: the *InRoot functions use the
+// caller's root directly, and the absolute-path functions open the target's
+// parent directory as a root and write through it. The absolute-path surface
+// is therefore a thin adapter over one confined write engine.
 package atomicfile

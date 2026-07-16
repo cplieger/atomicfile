@@ -148,8 +148,8 @@ func TestPreserveOwnership(t *testing.T) {
 // TestWriteFile_PreserveOwnership_ChownFailure_NonFatal pins the best-effort
 // contract: when the temp-file chown fails, the write still lands (data at the
 // final path, Result.Durable true) and the failure surfaces as a single Warn.
-// Uses the osChown seam because a real chown failure is unforceable from a
-// same-owner test. Not parallel: it mutates the package osChown var.
+// Uses the rootChown seam because a real chown failure is unforceable from a
+// same-owner test. Not parallel: it mutates the package rootChown var.
 func TestWriteFile_PreserveOwnership_ChownFailure_NonFatal(t *testing.T) {
 	if isWindows() {
 		t.Skip("preserve-ownership uses *syscall.Stat_t (Unix-only)")
@@ -161,7 +161,7 @@ func TestWriteFile_PreserveOwnership_ChownFailure_NonFatal(t *testing.T) {
 		t.Fatalf("seed target: %v", err)
 	}
 	sentinel := errors.New("injected chown failure")
-	stubOsChown(t, sentinel)
+	stubRootChown(t, sentinel)
 
 	h := &captureHandler{}
 	res, err := WriteFile(context.Background(), path, []byte("new"),

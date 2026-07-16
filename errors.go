@@ -29,7 +29,9 @@ var (
 type WritePhase int
 
 const (
-	// PhaseTempCreate indicates failure creating the temp file.
+	// PhaseTempCreate indicates failure opening the destination for writing:
+	// opening the target's parent directory (the absolute-path entry points
+	// open it as an *os.Root) or creating the temp file inside it.
 	PhaseTempCreate WritePhase = iota + 1
 	// PhaseTempWrite indicates failure writing to the temp file.
 	PhaseTempWrite

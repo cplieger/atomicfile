@@ -78,34 +78,25 @@ func assertContent(t *testing.T, path, want string) {
 	}
 }
 
-// stubFsyncDir replaces the package fsyncDir seam with one that returns err,
-// restoring the original when the test finishes. Tests using it must not call
-// t.Parallel: they mutate package state.
-func stubFsyncDir(t *testing.T, err error) {
-	t.Helper()
-	orig := fsyncDir
-	t.Cleanup(func() { fsyncDir = orig })
-	fsyncDir = func(string) error { return err }
-}
-
-// stubOsChown replaces the package osChown seam with one that returns err,
-// restoring the original when the test finishes. Tests using it must not call
-// t.Parallel: they mutate package state.
-func stubOsChown(t *testing.T, err error) {
-	t.Helper()
-	orig := osChown
-	t.Cleanup(func() { osChown = orig })
-	osChown = func(string, int, int) error { return err }
-}
-
 // stubFsyncRootDir replaces the package fsyncRootDir seam with one that returns
-// err, restoring the original when the test finishes. Tests using it must not
-// call t.Parallel: they mutate package state.
+// err, restoring the original when the test finishes. Every write entry point
+// (absolute-path adapters included) commits through this seam. Tests using it
+// must not call t.Parallel: they mutate package state.
 func stubFsyncRootDir(t *testing.T, err error) {
 	t.Helper()
 	orig := fsyncRootDir
 	t.Cleanup(func() { fsyncRootDir = orig })
 	fsyncRootDir = func(*os.Root, string) error { return err }
+}
+
+// stubRootChown replaces the package rootChown seam with one that returns err,
+// restoring the original when the test finishes. Tests using it must not call
+// t.Parallel: they mutate package state.
+func stubRootChown(t *testing.T, err error) {
+	t.Helper()
+	orig := rootChown
+	t.Cleanup(func() { rootChown = orig })
+	rootChown = func(*os.Root, string, int, int) error { return err }
 }
 
 // openTestRoot makes a temp dir, opens it as an *os.Root, and registers the

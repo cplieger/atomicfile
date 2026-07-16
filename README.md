@@ -9,7 +9,9 @@
 
 > Crash-safe atomic file writes for Go
 
-A standalone Go library providing atomic file writes (temp→fsync→rename→dir-fsync), path cleaning with `os.Root`-based containment for the `*InRoot` APIs, bounded reads, and streaming writes. Standard-library only, no external runtime dependencies.
+A standalone Go library providing atomic file writes (temp→fsync→rename→dir-fsync), path cleaning with `os.Root`-based containment, bounded reads, and streaming writes. Standard-library only, no external runtime dependencies.
+
+Every write runs through one `os.Root`-confined engine: the `*InRoot` APIs use the caller's root directly, and the absolute-path APIs open the target's parent directory as a root and write through it. There is exactly one guard preamble, one temp-side barrier, and one commit-side barrier (rename + parent-dir fsync) in the package.
 
 ## Platform Support
 
@@ -103,10 +105,11 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 ### Streaming Writer
 
 - `NewPendingFile(ctx, path, opts ...Option) (*PendingFile, error)` — open a temp file for incremental writing (mode via `WithMode`)
+- `NewPendingFileInRoot(ctx, root, name, opts ...Option) (*PendingFile, error)` — same, confined to an `*os.Root`: the temp, rename, and parent-dir fsync all run through the caller's root, which stays caller-owned (keep it open through Commit/Cleanup)
 - `(*PendingFile).Commit(ctx) (Result, error)` — chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
 - `(*PendingFile).Cleanup() error` — close + remove (abort; no-op after Commit, idempotent). Safe to `defer` immediately after `NewPendingFile`.
 
-`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface.
+`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface; its `Name()` reports the staged temp's path, so an external verifier can inspect the temp before `Commit` publishes it.
 
 ### Read Functions
 
@@ -115,7 +118,7 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 
 ### Utilities
 
-- `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)` — remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape — `.atomicfile-<digits>.tmp`, where the `<digits>` are the decimal random string `os.CreateTemp` substitutes for the pattern's `*` — older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (e.g. `.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched.
+- `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)` — remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape — `.atomicfile-<digits>.tmp`, with a crypto/rand decimal digit run in the middle — older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (e.g. `.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched. The reap decision is taken from a fresh `Lstat` immediately before each unlink, so a same-named fresh temp created between the directory scan and the removal is spared.
 
 ## Result and Durability
 
@@ -154,7 +157,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 
 The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.
 
-Failures in the write barrier (create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. Pre-barrier failures are returned as their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All remain inspectable with `errors.Is` / `errors.As`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
+Failures in the write barrier (open destination / create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. `PhaseTempCreate` covers opening the destination for writing — for the absolute-path entry points that includes opening the target's parent directory as an `*os.Root` (a missing parent without `WithMkdirMode` surfaces here) — as well as creating the temp file inside it. Pre-barrier failures are returned as their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All remain inspectable with `errors.Is` / `errors.As`. A `*WriteError` always means the data did **not** reach its final path; use `errors.As` to inspect it.
 
 ## Durability Guarantees
 
@@ -174,6 +177,17 @@ If the parent-directory fsync fails (for example an `EIO` from a failing disk), 
 By default, all write functions refuse to write to a path that is currently a symlink, returning `ErrSymlinkTarget`. This is because `os.Rename` replaces the symlink itself rather than the file it points to — which is rarely the caller's intent and can lead to data loss or security issues.
 
 To opt in to writing through a symlink (replacing the symlink with a regular file), use `WithAllowSymlinkTarget()`. To write to the link's target instead, resolve it with `filepath.EvalSymlinks` first.
+
+> **Metadata reads under `WithAllowSymlinkTarget` (v2.2 behavior note).** Since
+> the absolute-path entry points adopted the root-confined engine, the
+> symlink-following stat that `WithPreserveMode` / `WithPreserveOwnership`
+> perform runs through an `os.Root` of the target's parent directory. A symlink
+> target whose destination is absolute or escapes that directory is therefore no
+> longer followed for the metadata read: preserve-mode falls back to the
+> `WithMode` value and preserve-ownership becomes a no-op for such links (the
+> write itself replaces the link as before). Links resolving within the parent
+> directory behave unchanged. This tightens the previously documented
+> metadata-influence window; no other option semantics changed.
 
 Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself -- open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root.
 

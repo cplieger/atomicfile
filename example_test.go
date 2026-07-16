@@ -142,3 +142,19 @@ func ExampleWriteFileInRoot() {
 	fmt.Println(string(data))
 	// Output: confined
 }
+
+func ExampleNewPendingFileInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	root, _ := os.OpenRoot(dir)
+	defer func() { _ = root.Close() }()
+	// The pending temp and its eventual rename are confined to the root's
+	// tree; the caller keeps ownership of the root.
+	pf, _ := atomicfile.NewPendingFileInRoot(context.Background(), root, "staged.txt")
+	defer func() { _ = pf.Cleanup() }()
+	_, _ = pf.Write([]byte("confined incremental"))
+	res, _ := pf.Commit(context.Background())
+	data, _ := os.ReadFile(res.Path)
+	fmt.Println(string(data))
+	// Output: confined incremental
+}

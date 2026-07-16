@@ -19,7 +19,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 	sentinel := errors.New("injected dir fsync failure")
 
 	t.Run("WriteFile", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		res, err := WriteFile(context.Background(), path, []byte("payload"), WithMode(0o644))
@@ -33,7 +33,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 	})
 
 	t.Run("WriteReader", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		res, err := WriteReader(context.Background(), path, strings.NewReader("payload"))
@@ -47,7 +47,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 	})
 
 	t.Run("PendingFile.Commit", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		pf, err := NewPendingFile(context.Background(), path)
@@ -71,7 +71,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 // A dir-fsync failure must emit a Warn-level log so operators can detect the
 // degraded-durability condition.
 func TestDirSyncFailure_LogsWarn(t *testing.T) {
-	stubFsyncDir(t, errors.New("injected dir fsync failure"))
+	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	var buf bytes.Buffer
@@ -94,7 +94,7 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 	sentinel := errors.New("dir fsync must not be called under WithNoSync")
 
 	t.Run("WriteFile", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		res, err := WriteFile(context.Background(), path, []byte("payload"), WithNoSync())
@@ -108,7 +108,7 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 	})
 
 	t.Run("WriteReader", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		res, err := WriteReader(context.Background(), path, strings.NewReader("payload"), WithNoSync())
@@ -122,7 +122,7 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 	})
 
 	t.Run("PendingFile.Commit", func(t *testing.T) {
-		stubFsyncDir(t, sentinel)
+		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
 		pf, err := NewPendingFile(context.Background(), path, WithNoSync())
@@ -143,26 +143,26 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 	})
 }
 
-// The production fsyncDir is replaced by a stub in every other dir-sync test.
-// This pins the real implementation directly: a valid directory syncs cleanly,
-// and a missing directory surfaces the open error. Serial (no t.Parallel) so it
-// never races the stub swappers.
-func TestFsyncDir_Production(t *testing.T) {
+// The production fsyncRootDir is replaced by a stub in every other dir-sync
+// test. This pins the real implementation directly: a valid directory syncs
+// cleanly, and a missing directory surfaces the open error. Serial (no
+// t.Parallel) so it never races the stub swappers.
+func TestFsyncRootDir_Production(t *testing.T) {
 	t.Run("valid_dir_returns_nil", func(t *testing.T) {
-		if err := fsyncDir(t.TempDir()); err != nil {
-			t.Errorf("fsyncDir(validDir) = %v, want nil", err)
+		root, _ := openTestRoot(t)
+		if err := fsyncRootDir(root, "."); err != nil {
+			t.Errorf("fsyncRootDir(validDir) = %v, want nil", err)
 		}
 	})
 
 	t.Run("missing_dir_returns_open_error", func(t *testing.T) {
-		dir := t.TempDir()
-		missing := filepath.Join(dir, "does-not-exist")
-		err := fsyncDir(missing)
+		root, _ := openTestRoot(t)
+		err := fsyncRootDir(root, "does-not-exist")
 		if err == nil {
-			t.Fatal("fsyncDir(missingDir) = nil, want open error")
+			t.Fatal("fsyncRootDir(missingDir) = nil, want open error")
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("fsyncDir(missingDir) = %v, want errors.Is os.ErrNotExist", err)
+			t.Errorf("fsyncRootDir(missingDir) = %v, want errors.Is os.ErrNotExist", err)
 		}
 	})
 }
@@ -171,7 +171,7 @@ func TestFsyncDir_Production(t *testing.T) {
 // recorded (not-durable, nil-error) Result is returned again, and the content
 // remains at the final path.
 func TestPendingFile_Commit_IdempotentAfterDirSyncFailure(t *testing.T) {
-	stubFsyncDir(t, errors.New("injected dir fsync failure"))
+	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "retry.txt")
 	pf, err := NewPendingFile(context.Background(), path)

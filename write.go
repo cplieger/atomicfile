@@ -6,19 +6,17 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // Result reports the outcome of an atomic write that reached its final path.
 type Result struct {
 	// Path is the cleaned final path the data was written to. It is
 	// absolute for the package-level write functions (which require an
-	// absolute path); for WriteFileInRoot and WriteReaderInRoot it is
-	// root.Name() joined with the cleaned relative name, so it is relative
-	// when the *os.Root was opened with a relative path.
+	// absolute path); for the *InRoot functions it is root.Name() joined
+	// with the cleaned relative name, so it is relative when the *os.Root
+	// was opened with a relative path.
 	Path string
 	// Durable reports whether the write is guaranteed to survive a crash:
 	// true only when the file and its parent directory were both fsynced.
@@ -29,81 +27,38 @@ type Result struct {
 	Durable bool
 }
 
-// resolveMode determines the mode to apply, honoring WithPreserveMode.
-func resolveMode(target string, c *cfg) os.FileMode {
-	if c.preserveMode {
-		fi, err := os.Stat(target)
-		if err == nil {
-			return fi.Mode().Perm()
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Warn("atomicfile: preserve-mode stat failed; using explicit mode",
-				"target", target, "error", err)
-		}
-	}
-	return c.mode
-}
-
-// osChown changes the ownership of a file. It is a package var so tests can
-// inject a chown failure; a real EPERM is impractical to force from a
-// same-owner test (and root cannot fail it at all). Production never reassigns it.
-var osChown = os.Chown
-
-// applyOwnership chowns tmpName to match target's uid/gid when
-// WithPreserveOwnership is set. No-op when the target is absent or the
-// platform's FileInfo.Sys() is not a *syscall.Stat_t (e.g. non-Unix).
-// Best-effort: a failed chown is logged at Warn and the write proceeds with
-// the writer's ownership; it never aborts the write.
-func applyOwnership(tmpName, target string, c *cfg) {
-	if !c.preserveOwnership {
-		return
-	}
-	fi, err := os.Stat(target)
+// openParentRoot runs the absolute-path adapter preamble: validate and clean
+// path, honor ctx, optionally create the parent directory chain, and open the
+// parent directory as an *os.Root. Every subsequent filesystem operation for
+// the write runs through that root, so the absolute-path entry points share
+// the root-confined engine (openTempForRoot / writeAtomicInRoot /
+// commitTempInRoot) instead of maintaining a parallel implementation.
+//
+// An OpenRoot failure is tagged PhaseTempCreate: it is the same "destination
+// not writable/present" class that a temp-creation failure surfaces (e.g. a
+// missing parent without WithMkdirMode), and callers classify on that phase.
+// The caller owns the returned root and must close it. The engine's
+// Result.Path (root.Name() joined with base) reproduces the cleaned absolute
+// path exactly, so the clean form is not returned separately.
+func openParentRoot(ctx context.Context, path string, c *cfg) (root *os.Root, base string, err error) {
+	cleanPath, err := validateAbsClean(path)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Warn("atomicfile: preserve-ownership stat failed; keeping writer ownership",
-				"target", target, "error", err)
-		}
-		return
+		return nil, "", err
 	}
-	stat, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, "", fmt.Errorf("atomicfile: %w", ctxErr)
 	}
-	if err := osChown(tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
-		c.logger.Warn("atomicfile: preserve-ownership chown failed; keeping writer ownership",
-			"target", target, "uid", stat.Uid, "gid", stat.Gid, "error", err)
-	}
-}
-
-// removeTemp deletes a temp file best-effort, logging at Debug when removal
-// fails for a reason other than the file already being gone.
-func removeTemp(tmpName string, logger *slog.Logger) {
-	if rmErr := os.Remove(tmpName); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
-		logger.Debug("atomicfile: temp file cleanup failed", "path", tmpName, "error", rmErr)
-	}
-}
-
-// openTempForPath runs the pre-barrier preamble shared by every write entry
-// point: validate path, honor ctx, refuse symlinks, optionally create the
-// parent directory, and create the temp file. It is the single place that
-// enforces the path-safety contract; add new pre-write checks here.
-func openTempForPath(ctx context.Context, path string, c *cfg) (tmp *os.File, cleanPath, dir string, err error) {
-	cleanPath, err = checkWritePath(ctx, path, c)
-	if err != nil {
-		return nil, "", "", err
-	}
-	dir = filepath.Dir(cleanPath)
+	dir := filepath.Dir(cleanPath)
 	if c.mkdirMode != 0 {
 		if mkErr := os.MkdirAll(dir, c.mkdirMode); mkErr != nil {
-			return nil, "", "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
+			return nil, "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
 		}
 	}
-	tmp, err = os.CreateTemp(dir, tempPattern)
+	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return nil, "", "", &WriteError{Phase: PhaseTempCreate, Err: err}
+		return nil, "", &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
-	return tmp, cleanPath, dir, nil
+	return root, filepath.Base(cleanPath), nil
 }
 
 // finalizeTempFile runs the temp-side durability barrier on an open temp file
@@ -138,75 +93,17 @@ func finalizeTempFile(ctx context.Context, tmp *os.File, mode os.FileMode, noSyn
 	return nil
 }
 
-// fsyncDir fsyncs a directory so a prior rename survives a crash. It is a
-// package var so tests can inject a failure; a real fsync(2) on a directory fd
-// is impractical to force on a healthy filesystem. Production never reassigns it.
-var fsyncDir = func(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
-// commitTemp finalizes a synced, closed temp file: apply ownership, atomically
-// rename to cleanPath, then fsync the parent directory. It returns whether the
-// write is durable. A pre-rename failure removes the temp and returns an error
-// (the data did not land). Once the rename succeeds the data is at cleanPath;
-// a subsequent parent-dir fsync failure is logged at Warn and reported as
-// durable=false with a nil error, never as a hard failure.
-func commitTemp(tmpName, cleanPath, dir string, c *cfg) (durable bool, err error) {
-	applyOwnership(tmpName, cleanPath, c)
-	if rnErr := os.Rename(tmpName, cleanPath); rnErr != nil {
-		removeTemp(tmpName, c.logger)
-		return false, &WriteError{Phase: PhaseRename, Err: rnErr}
-	}
-	if c.noSync {
-		return false, nil
-	}
-	if syncErr := fsyncDir(dir); syncErr != nil {
-		c.logger.Warn("atomicfile: parent-directory fsync failed; write is not durable",
-			"path", cleanPath, "error", syncErr)
-		return false, nil
-	}
-	return true, nil
-}
-
-// writeAtomic runs the open -> write -> finalize -> commit orchestration shared
-// by WriteFile and WriteReader: open the temp file, capture its name under the
-// committed-flag leak-cleanup defer, run the caller's writeData step, then hand
-// off to the temp-side barrier and commit. writeData is the only varying part
-// (the byte slice write vs the reader copy); a write error it returns is tagged
-// PhaseTempWrite here so both entry points report failures identically. Keep in
-// sync with PendingFile.commit, which reuses the same barrier/commit helpers but
-// skips this open/write preamble (its file is already open and written).
+// writeAtomic adapts an absolute-path write onto the root-confined engine:
+// open the parent directory as an *os.Root, then run writeAtomicInRoot on the
+// base name. The engine's Result.Path (root.Name() joined with the base) is
+// exactly the cleaned absolute path, so no fixup is needed.
 func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.File) error) (Result, error) {
-	tmp, cleanPath, dir, err := openTempForPath(ctx, path, c)
+	root, base, err := openParentRoot(ctx, path, c)
 	if err != nil {
 		return Result{}, err
 	}
-	tmpName := tmp.Name()
-	committed := false
-	defer func() {
-		if !committed {
-			removeTemp(tmpName, c.logger)
-		}
-	}()
-	mode := resolveMode(cleanPath, c)
-	if wErr := writeData(tmp); wErr != nil {
-		tmp.Close()
-		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}
-	}
-	if fErr := finalizeTempFile(ctx, tmp, mode, c.noSync); fErr != nil {
-		return Result{}, fErr
-	}
-	committed = true
-	durable, cErr := commitTemp(tmpName, cleanPath, dir, c)
-	if cErr != nil {
-		return Result{}, cErr
-	}
-	return Result{Path: cleanPath, Durable: durable}, nil
+	defer root.Close()
+	return writeAtomicInRoot(ctx, root, base, c, writeData)
 }
 
 // WriteFile atomically writes data to path. Mode defaults to 0o644 (override
@@ -284,10 +181,20 @@ const (
 )
 
 // PendingFile is a temp file open for writing, destined to atomically replace
-// path on Commit. It embeds *os.File, so callers get the full
-// io.Writer/io.ReaderFrom/fmt.Fprintf surface. The configuration is captured at
-// construction and reused at Commit, so durability options cannot drift between
-// the two calls.
+// a target on Commit. It embeds *os.File, so callers get the full
+// io.Writer/io.ReaderFrom/fmt.Fprintf surface, and the embedded Name() reports
+// the temp's path (root.Name() joined with the temp name — absolute for
+// NewPendingFile), so the staged file can be handed to external verifiers
+// before Commit. The configuration is captured at construction and reused at
+// Commit, so durability options cannot drift between the two calls.
+//
+// Every filesystem operation (temp creation, rename, parent-dir fsync,
+// removal) runs through an *os.Root: the caller's root for
+// NewPendingFileInRoot, or a root of the target's parent directory that
+// NewPendingFile opens and owns. An owned root is closed when the PendingFile
+// reaches a terminal state (Commit called, or Cleanup succeeded); an abandoned
+// PendingFile therefore holds two file descriptors (temp + root) until then,
+// just as it holds its temp file on disk.
 //
 // A PendingFile is not safe for concurrent use: Commit and Cleanup mutate
 // unsynchronized lifecycle state (state, result, err). Confine each PendingFile
@@ -296,13 +203,38 @@ const (
 // paths.
 type PendingFile struct {
 	*os.File
-	cfg    *cfg
-	err    error
-	path   string
-	dir    string
-	result Result
-	mode   os.FileMode
-	state  pendingState
+	cfg     *cfg
+	root    *os.Root
+	err     error
+	path    string // Result.Path value: root.Name() joined with the final name
+	name    string // final name, relative to root
+	dir     string // parent of name inside root, for the commit-side dir fsync
+	tmpName string // temp name, relative to root
+	result  Result
+	mode    os.FileMode
+	ownRoot bool // NewPendingFile opened root and must close it at a terminal state
+	state   pendingState
+}
+
+// newPendingFromRoot creates the staged temp inside root via the engine
+// preamble and assembles the PendingFile. ownRoot records whether the
+// PendingFile must close root when it reaches a terminal state.
+func newPendingFromRoot(ctx context.Context, root *os.Root, name string, ownRoot bool, c *cfg) (*PendingFile, error) {
+	tmp, cleanName, dir, tmpName, err := openTempForRoot(ctx, root, name, c)
+	if err != nil {
+		return nil, err
+	}
+	return &PendingFile{
+		File:    tmp,
+		cfg:     c,
+		root:    root,
+		path:    filepath.Join(root.Name(), cleanName),
+		name:    cleanName,
+		dir:     dir,
+		tmpName: tmpName,
+		ownRoot: ownRoot,
+		mode:    resolveModeInRoot(root, cleanName, c),
+	}, nil
 }
 
 // NewPendingFile creates a temp file destined to atomically replace path. Write
@@ -310,17 +242,30 @@ type PendingFile struct {
 // 0o644 (override with WithMode). ctx is checked before the temp is created.
 func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingFile, error) {
 	c := buildCfg(opts)
-	tmp, cleanPath, dir, err := openTempForPath(ctx, path, c)
+	root, base, err := openParentRoot(ctx, path, c)
 	if err != nil {
 		return nil, err
 	}
-	return &PendingFile{
-		File: tmp,
-		cfg:  c,
-		path: cleanPath,
-		dir:  dir,
-		mode: resolveMode(cleanPath, c),
-	}, nil
+	pf, err := newPendingFromRoot(ctx, root, base, true, c)
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	return pf, nil
+}
+
+// closeOwnedRoot closes the parent-directory root when this PendingFile opened
+// it (NewPendingFile). Idempotent: the flag is cleared on the first close. A
+// caller-provided root (NewPendingFileInRoot) is never closed.
+func (p *PendingFile) closeOwnedRoot() {
+	if !p.ownRoot {
+		return
+	}
+	p.ownRoot = false
+	if err := p.root.Close(); err != nil {
+		p.cfg.logger.Debug("atomicfile: pending parent root close failed",
+			"path", p.path, "error", err)
+	}
 }
 
 // Commit runs the durability barrier (chmod, optional fsync, close), applies
@@ -343,22 +288,22 @@ func (p *PendingFile) Commit(ctx context.Context) (Result, error) {
 	}
 	p.state = pendingCommitted
 	p.result, p.err = p.commit(ctx)
+	p.closeOwnedRoot()
 	return p.result, p.err
 }
 
 func (p *PendingFile) commit(ctx context.Context) (Result, error) {
-	tmpName := p.Name()
 	committed := false
 	defer func() {
 		if !committed {
-			removeTemp(tmpName, p.cfg.logger)
+			removeTempInRoot(p.root, p.tmpName, p.cfg.logger)
 		}
 	}()
 	if fErr := finalizeTempFile(ctx, p.File, p.mode, p.cfg.noSync); fErr != nil {
 		return Result{}, fErr
 	}
 	committed = true
-	durable, cErr := commitTemp(tmpName, p.path, p.dir, p.cfg)
+	durable, cErr := commitTempInRoot(p.root, p.tmpName, p.name, p.dir, p.cfg)
 	if cErr != nil {
 		return Result{}, cErr
 	}
@@ -381,22 +326,23 @@ func (p *PendingFile) Cleanup() error {
 	case pendingCommitted, pendingCleaned:
 		return nil
 	case pendingCleanupFailed:
-		if err := os.Remove(p.Name()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := p.root.Remove(p.tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		p.state = pendingCleaned
+		p.closeOwnedRoot()
 		return nil
 	}
 	// pendingOpen: first cleanup attempt. Close the fd, then remove the temp.
-	tmpName := p.Name()
 	if clErr := p.Close(); clErr != nil {
 		p.cfg.logger.Debug("atomicfile: pending file close during cleanup failed",
-			"path", tmpName, "error", clErr)
+			"path", p.Name(), "error", clErr)
 	}
-	if err := os.Remove(tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := p.root.Remove(p.tmpName); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		p.state = pendingCleanupFailed
 		return err
 	}
 	p.state = pendingCleaned
+	p.closeOwnedRoot()
 	return nil
 }

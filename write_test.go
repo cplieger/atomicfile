@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -116,12 +115,28 @@ func TestWriteFile(t *testing.T) {
 		}
 	})
 
-	t.Run("missing_parent_is_error_without_mkdir", func(t *testing.T) {
+	// A missing parent without WithMkdirMode must fail with PhaseTempCreate:
+	// the destination could not be opened for temp creation. vibekit's
+	// transient-failure classification branches on exactly this phase, so the
+	// adapter's os.OpenRoot failure mapping is a pinned contract, not an
+	// implementation detail.
+	t.Run("missing_parent_is_PhaseTempCreate_without_mkdir", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "x", "y", "file.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data")); err == nil {
+		_, err := WriteFile(context.Background(), path, []byte("data"))
+		if err == nil {
 			t.Fatal("expected error for missing parent without WithMkdirMode")
+		}
+		var we *WriteError
+		if !errors.As(err, &we) {
+			t.Fatalf("error = %T (%v), want *WriteError", err, err)
+		}
+		if we.Phase != PhaseTempCreate {
+			t.Errorf("WriteError.Phase = %v, want PhaseTempCreate", we.Phase)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("error = %v, want it to wrap fs.ErrNotExist", err)
 		}
 	})
 }
@@ -459,8 +474,8 @@ func TestMkdirMode_BlockedByFile(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// A regular file in the parent chain makes the symlink pre-check's Lstat
-	// fail ENOTDIR before MkdirAll; the write must error and leave no temp.
+	// A regular file in the parent chain makes MkdirAll fail ENOTDIR; the
+	// write must error and leave no temp.
 	path := filepath.Join(blocker, "sub", "file.txt")
 	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
 	if err == nil {
@@ -469,13 +484,12 @@ func TestMkdirMode_BlockedByFile(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// TestWriteFile_MkdirMode_ParentNotWritable_WrapsError reaches the MkdirAll
-// failure branch that TestMkdirMode_BlockedByFile cannot: a traversable but
-// non-writable parent passes the symlink pre-check (ENOENT on the missing leaf)
-// while MkdirAll then fails EACCES, so the error is the "create parent
-// directory" wrap of os.ErrPermission, never a *WriteError (which is reserved
-// for post-temp-create phases). Non-root only; not parallel, matching the
-// sibling permission tests.
+// TestWriteFile_MkdirMode_ParentNotWritable_WrapsError pins the MkdirAll
+// failure contract: a traversable but non-writable parent makes MkdirAll fail
+// EACCES, so the error is the "create parent directory" wrap of
+// os.ErrPermission, never a *WriteError (which is reserved for the
+// destination-open and post-temp-create phases). Non-root only; not parallel,
+// matching the sibling permission tests.
 func TestWriteFile_MkdirMode_ParentNotWritable_WrapsError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits")
@@ -565,13 +579,14 @@ func TestWrite_CancelledContext_NoTempLeak(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// cancelAt=2 trips the ctx guard at the top of finalizeTempFile (after the temp
-// write, before chmod).
+// The absolute write path checks ctx at openParentRoot (1) and openTempForRoot
+// (2); cancelAt=3 therefore trips the ctx guard at the top of finalizeTempFile
+// (after the temp write, before chmod).
 func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "afterwrite.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
 	_, err := WriteFile(ctx, path, []byte("data"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteFile(cancel-after-write) = %v, want context.Canceled", err)
@@ -582,12 +597,14 @@ func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// cancelAt=3 trips the post-Sync ctx guard inside finalizeTempFile.
+// cancelAt=4 trips the post-Sync ctx guard inside finalizeTempFile (checks 1-2
+// are the openParentRoot and openTempForRoot preamble guards, 3 the pre-chmod
+// guard).
 func TestWriteFile_CancelAfterSync_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aftersync.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 4}
 	_, err := WriteFile(ctx, path, []byte("data"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteFile(cancel-after-sync) = %v, want context.Canceled", err)
@@ -602,7 +619,7 @@ func TestWriteReader_CancelMidBarrier_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wr-midbarrier.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
 	_, err := WriteReader(ctx, path, plainReader{r: strings.NewReader("data")})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteReader(cancel-mid-barrier) = %v, want context.Canceled", err)
@@ -615,16 +632,16 @@ func TestWriteReader_CancelMidBarrier_NoTempLeak(t *testing.T) {
 
 // WriteReader takes the io.WriterTo fast path when the source implements it
 // (strings.Reader does). writerCtx wraps the destination so the WriterTo write
-// still observes ctx cancellation. seqCancelCtx{cancelAt:2} passes the
-// openTempForPath ctx check then trips inside the first writerCtx.Write, so the
-// write aborts with a PhaseTempWrite WriteError wrapping context.Canceled,
-// leaving no final file and no temp.
+// still observes ctx cancellation. seqCancelCtx{cancelAt:3} passes the
+// openParentRoot and openTempForRoot ctx checks then trips inside the first
+// writerCtx.Write, so the write aborts with a PhaseTempWrite WriteError
+// wrapping context.Canceled, leaving no final file and no temp.
 func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wt-cancel.txt")
 
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
 	_, err := WriteReader(ctx, path, strings.NewReader("payload"))
 
 	if !errors.Is(err, context.Canceled) {
@@ -638,46 +655,4 @@ func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
 		t.Errorf("final file exists after cancelled WriterTo write, want absent")
 	}
 	assertNoTempLeak(t, dir)
-}
-
-// A successful temp removal is silent (no Debug log).
-func TestRemoveTemp_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "removable.tmp")
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed temp file: %v", err)
-	}
-	h := &captureHandler{}
-
-	removeTemp(path, slog.New(h))
-
-	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 0 {
-		t.Errorf("removeTemp(existing removable file) logged %q %d times, want 0", msgRemoveTempFailed, got)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("removeTemp(%q) left file behind: Stat err = %v, want ErrNotExist", path, err)
-	}
-}
-
-// A removal failing for a reason other than ErrNotExist is logged once at Debug.
-// os.Remove of a non-empty directory fails with a non-ErrNotExist error on every
-// platform, so no permission tricks are needed.
-func TestRemoveTemp_FailedRemoval_LogsDebug(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	nonEmpty := filepath.Join(dir, "busy")
-	if err := os.Mkdir(nonEmpty, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed child: %v", err)
-	}
-	h := &captureHandler{}
-
-	removeTemp(nonEmpty, slog.New(h))
-
-	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 1 {
-		t.Errorf("removeTemp(non-empty dir) logged %q %d times, want 1", msgRemoveTempFailed, got)
-	}
 }
