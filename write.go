@@ -62,22 +62,38 @@ func openParentRoot(ctx context.Context, path string, c *cfg) (root *os.Root, ba
 }
 
 // finalizeTempFile runs the temp-side durability barrier on an open temp file
-// that already holds its content: chmod, optional fsync (skipped under
-// WithNoSync), then close. A ctx check brackets the fsync on both sides so a
-// cancelled context aborts before and after the most expensive step. On any
-// error before close it closes the file and returns; the caller's deferred
-// cleanup removes the temp. This is the single source of truth for the
-// temp-side barrier — a barrier change must land here and nowhere else.
-func finalizeTempFile(ctx context.Context, tmp *os.File, mode os.FileMode, noSync bool) error {
+// that already holds its content: verify a WithMaxBytes cap against the
+// staged file's actual size, chmod, optional fsync (skipped under
+// WithNoSync), then close. The cap check is the authoritative one — it
+// measures the file itself (fstat), so bytes staged outside the streaming
+// interfaces (WriteAt, Write after Seek, a reopen of the temp by path) can
+// never publish an over-cap file; the rejection matches ErrFileTooLarge. A
+// ctx check brackets the fsync on both sides so a cancelled context aborts
+// before and after the most expensive step. On any error before close it
+// closes the file and returns; the caller's deferred cleanup removes the
+// temp. This is the single source of truth for the temp-side barrier — a
+// barrier change must land here and nowhere else.
+func finalizeTempFile(ctx context.Context, tmp *os.File, mode os.FileMode, c *cfg) error {
 	if err := ctx.Err(); err != nil {
 		tmp.Close()
 		return fmt.Errorf("atomicfile: %w", err)
+	}
+	if c.maxBytes > 0 {
+		fi, err := tmp.Stat()
+		if err != nil {
+			tmp.Close()
+			return fmt.Errorf("atomicfile: stat staged file for WithMaxBytes check: %w", err)
+		}
+		if fi.Size() > c.maxBytes {
+			tmp.Close()
+			return fmt.Errorf("%w: staged file is %d bytes (max %d)", ErrFileTooLarge, fi.Size(), c.maxBytes)
+		}
 	}
 	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
-	if !noSync {
+	if !c.noSync {
 		if err := tmp.Sync(); err != nil {
 			tmp.Close()
 			return &WriteError{Phase: PhaseTempSync, Err: err}
@@ -246,7 +262,9 @@ const (
 // ReadFrom maintain a byte count (BytesWritten) that Truncate re-syncs, and a
 // WithMaxBytes cap is enforced on exactly that stream. Operations on the
 // embedded *os.File that step outside the stream model (WriteAt, Write after
-// Seek) bypass both the accounting and the cap.
+// Seek) bypass the accounting, but not the cap: Commit re-verifies the staged
+// file's actual size against the cap at the durability barrier and refuses to
+// publish an over-cap file (the error matches ErrFileTooLarge).
 //
 // Every filesystem operation (temp creation, rename, parent-dir fsync,
 // removal) runs through an *os.Root: the caller's root for
@@ -387,7 +405,8 @@ func (p *PendingFile) Truncate(size int64) error {
 // BytesWritten reports the staged file's size under the append-stream model:
 // bytes accepted through Write, WriteString, and ReadFrom, re-synced by
 // Truncate. Operations on the embedded *os.File that step outside the stream
-// model (WriteAt, Write after Seek) are not tracked.
+// model (WriteAt, Write after Seek) are not tracked; a WithMaxBytes cap still
+// catches them at Commit, which verifies the staged file's actual size.
 func (p *PendingFile) BytesWritten() int64 { return p.written }
 
 // closeOwnedRoot closes the parent-directory root when this PendingFile opened
@@ -404,9 +423,13 @@ func (p *PendingFile) closeOwnedRoot() {
 	}
 }
 
-// Commit runs the durability barrier (chmod, optional fsync, close), applies
-// ownership, atomically renames the temp into place, and fsyncs the parent
-// directory. Commit is idempotent: repeated calls return the first result.
+// Commit runs the durability barrier (WithMaxBytes size verification, chmod,
+// optional fsync, close), applies ownership, atomically renames the temp into
+// place, and fsyncs the parent directory. With a WithMaxBytes cap set, the
+// staged file's actual size is measured (fstat) and an over-cap file fails
+// Commit with an error matching ErrFileTooLarge — bytes staged outside the
+// append-stream model cannot publish. Commit is idempotent: repeated calls
+// return the first result.
 // Calling Commit after Cleanup returns ErrAborted — the temp was already
 // removed, so there is nothing to commit, and a nil error would falsely signal
 // that the data reached its final path. After a successful Commit, Cleanup is a
@@ -435,7 +458,7 @@ func (p *PendingFile) commit(ctx context.Context) (Result, error) {
 			removeTempInRoot(p.root, p.tmpName, p.cfg.logger)
 		}
 	}()
-	if fErr := finalizeTempFile(ctx, p.File, p.mode, p.cfg.noSync); fErr != nil {
+	if fErr := finalizeTempFile(ctx, p.File, p.mode, p.cfg); fErr != nil {
 		return Result{}, fErr
 	}
 	committed = true

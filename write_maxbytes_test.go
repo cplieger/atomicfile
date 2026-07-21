@@ -303,3 +303,178 @@ func TestPendingFileUncappedTracksBytes(t *testing.T) {
 		t.Errorf("BytesWritten = %d, want 8", got)
 	}
 }
+
+// TestPendingFileMaxBytesCommitBarrier pins the barrier-side backstop for
+// bytes staged outside the append-stream model: WriteAt and Write-after-Seek
+// (both through the embedded *os.File) and a reopen of the staged temp by
+// path all evade the streaming cap, so Commit re-verifies the staged file's
+// actual size against the WithMaxBytes cap and refuses to publish an
+// over-cap file. An exactly-at-cap staged size still publishes.
+func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
+	t.Parallel()
+	const capBytes = 4
+	cases := []struct {
+		name    string
+		stage   func(t *testing.T, pf *PendingFile)
+		want    string // committed content for the success case
+		wantErr bool
+	}{
+		{
+			name: "WriteAt past cap",
+			stage: func(t *testing.T, pf *PendingFile) {
+				t.Helper()
+				if _, err := pf.WriteAt([]byte("0123456789"), 0); err != nil {
+					t.Fatalf("WriteAt: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "sparse WriteAt far past cap",
+			stage: func(t *testing.T, pf *PendingFile) {
+				t.Helper()
+				if _, err := pf.WriteAt([]byte("x"), 63); err != nil {
+					t.Fatalf("WriteAt: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "Write after Seek",
+			stage: func(t *testing.T, pf *PendingFile) {
+				t.Helper()
+				if _, err := pf.Write([]byte("abcd")); err != nil { // at cap via the stream
+					t.Fatalf("stream write: %v", err)
+				}
+				if _, err := pf.Seek(0, io.SeekStart); err != nil {
+					t.Fatalf("Seek: %v", err)
+				}
+				// The embedded Write bypasses the capped override.
+				if _, err := pf.File.Write([]byte("0123456789")); err != nil {
+					t.Fatalf("embedded Write: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "reopen staged temp by path",
+			stage: func(t *testing.T, pf *PendingFile) {
+				t.Helper()
+				f, err := os.OpenFile(pf.Name(), os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatalf("reopen temp: %v", err)
+				}
+				if _, err := f.Write([]byte("0123456789")); err != nil {
+					f.Close()
+					t.Fatalf("write through reopened handle: %v", err)
+				}
+				if err := f.Close(); err != nil {
+					t.Fatalf("close reopened handle: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		{
+			name: "exactly at cap through WriteAt",
+			stage: func(t *testing.T, pf *PendingFile) {
+				t.Helper()
+				if _, err := pf.WriteAt([]byte("abcd"), 0); err != nil {
+					t.Fatalf("WriteAt: %v", err)
+				}
+			},
+			want: "abcd",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "f.txt")
+			const previous = "previous"
+			if _, err := WriteFile(context.Background(), path, []byte(previous)); err != nil {
+				t.Fatalf("seed write: %v", err)
+			}
+			pf, err := NewPendingFile(context.Background(), path, WithMaxBytes(capBytes))
+			if err != nil {
+				t.Fatalf("NewPendingFile: %v", err)
+			}
+			defer func() {
+				if clErr := pf.Cleanup(); clErr != nil {
+					t.Errorf("Cleanup: %v", clErr)
+				}
+			}()
+			tc.stage(t, pf)
+			_, err = pf.Commit(context.Background())
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Commit = %v, want success at cap", err)
+				}
+				requireIntactTarget(t, path, tc.want)
+				requireNoTemps(t, dir)
+				return
+			}
+			if !errors.Is(err, ErrFileTooLarge) {
+				t.Fatalf("Commit = %v, want ErrFileTooLarge", err)
+			}
+			if _, again := pf.Commit(context.Background()); !errors.Is(again, ErrFileTooLarge) {
+				t.Errorf("repeated Commit = %v, want the cached ErrFileTooLarge", again)
+			}
+			requireIntactTarget(t, path, previous)
+			requireNoTemps(t, dir)
+		})
+	}
+}
+
+// TestPendingFileInRootMaxBytesCommitBarrier pins that the commit-side cap
+// verification also holds for a root-confined PendingFile (the barrier is
+// shared; the entry point differs).
+func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer root.Close()
+	pf, err := NewPendingFileInRoot(context.Background(), root, "f.txt", WithMaxBytes(4))
+	if err != nil {
+		t.Fatalf("NewPendingFileInRoot: %v", err)
+	}
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.WriteAt([]byte("0123456789"), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if _, err := pf.Commit(context.Background()); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("Commit = %v, want ErrFileTooLarge", err)
+	}
+	if _, statErr := root.Stat("f.txt"); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("target exists after rejected commit (stat err = %v), want absent", statErr)
+	}
+	requireNoTemps(t, dir)
+}
+
+// TestPendingFileUncappedCommitIgnoresStagedSize pins that without a
+// WithMaxBytes cap the commit barrier performs no size check: out-of-stream
+// bytes publish fine.
+func TestPendingFileUncappedCommitIgnoresStagedSize(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "f.txt")
+	pf, err := NewPendingFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	defer func() { _ = pf.Cleanup() }()
+	if _, err := pf.WriteAt(bytes.Repeat([]byte("x"), 1<<10), 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if _, err := pf.Commit(context.Background()); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat committed file: %v", err)
+	}
+	if fi.Size() != 1<<10 {
+		t.Errorf("committed size = %d, want %d", fi.Size(), 1<<10)
+	}
+}

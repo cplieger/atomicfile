@@ -27,8 +27,12 @@
 // and WithMaxBytes mirrors that bound on the write side across every write
 // primitive: a writer that also owns the reader can refuse to persist a file
 // its own read path would refuse to load, instead of failing open on the
-// next read. Both directions report ErrFileTooLarge, and a capped write
-// always leaves the previous file at the target path intact.
+// next read. The cap is enforced twice: on the staged stream as bytes
+// arrive, and against the staged file's actual size at the durability
+// barrier before publication, so content staged outside the streaming
+// interfaces cannot publish either. Both directions report ErrFileTooLarge,
+// and a capped write always leaves the previous file at the target path
+// intact.
 //
 // # Confinement
 //

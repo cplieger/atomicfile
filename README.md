@@ -109,7 +109,7 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 - `(*PendingFile).Commit(ctx) (Result, error)` — chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
 - `(*PendingFile).Cleanup() error` — close + remove (abort; no-op after Commit, idempotent). Safe to `defer` immediately after `NewPendingFile`.
 
-`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface; its `Name()` reports the staged temp's path, so an external verifier can inspect the temp before `Commit` publishes it. It is written as an append-only stream: `Write`/`WriteString`/`ReadFrom` maintain a byte count (`BytesWritten()`), `Truncate` re-syncs it, and a `WithMaxBytes` cap is enforced on exactly that stream — the call that would cross the cap is rejected whole, so the staged temp never holds an over-cap prefix.
+`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface; its `Name()` reports the staged temp's path, so an external verifier can inspect the temp before `Commit` publishes it. It is written as an append-only stream: `Write`/`WriteString`/`ReadFrom` maintain a byte count (`BytesWritten()`), `Truncate` re-syncs it, and a `WithMaxBytes` cap is enforced on exactly that stream — the call that would cross the cap is rejected whole, so the staged temp never holds an over-cap prefix. `Commit` then re-verifies the staged file's actual size against the cap at the durability barrier, so bytes staged outside the stream (`WriteAt`, `Write` after `Seek`, a reopen of the temp by path) cannot publish an over-cap file either.
 
 ### Read Functions
 

@@ -258,7 +258,7 @@ func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, 
 		tmp.Close()
 		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}
 	}
-	if fErr := finalizeTempFile(ctx, tmp, mode, c.noSync); fErr != nil {
+	if fErr := finalizeTempFile(ctx, tmp, mode, c); fErr != nil {
 		return Result{}, fErr
 	}
 	committed = true

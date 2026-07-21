@@ -78,9 +78,12 @@ func WithAllowSymlinkTarget() Option {
 // temp file is created; WriteReader and WriteReaderInRoot reject the copy
 // chunk that would cross the cap; a PendingFile rejects the
 // Write/WriteString/ReadFrom call that would cross it, whole, so the staged
-// temp never holds an over-cap prefix (see PendingFile.Write). Every
-// rejection matches ErrFileTooLarge and leaves the previous file at the
-// target path intact. n <= 0 means no cap (the default).
+// temp never holds an over-cap prefix (see PendingFile.Write). The barrier
+// additionally verifies the staged file's actual size before publication, so
+// bytes staged outside those interfaces (WriteAt, Write after Seek, a reopen
+// of the temp by path) cannot publish an over-cap file. Every rejection
+// matches ErrFileTooLarge and leaves the previous file at the target path
+// intact. n <= 0 means no cap (the default).
 func WithMaxBytes(n int64) Option {
 	return func(c *cfg) { c.maxBytes = n }
 }
