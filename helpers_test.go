@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,19 +24,6 @@ const (
 	msgStaleRemoved     = "atomicfile.CleanupStaleTemps: removed stale temps"
 	msgStaleRemoveFail  = "atomicfile.CleanupStaleTemps: some stale temps could not be removed"
 )
-
-// countLogByMessage returns how many captured records match both level and
-// message exactly. Used to pin which best-effort log lines fire (and which do
-// not) for a given outcome.
-func countLogByMessage(records []slog.Record, level slog.Level, message string) int {
-	n := 0
-	for _, r := range records {
-		if r.Level == level && r.Message == message {
-			n++
-		}
-	}
-	return n
-}
 
 // replaceWithNonEmptyDir deletes the file at path and puts a non-empty
 // directory in its place. os.Remove of a non-empty directory fails with a
@@ -177,17 +165,65 @@ func (c *seqCancelCtx) Err() error {
 
 // captureHandler is a slog.Handler that records every emitted record, letting
 // the best-effort logging tests assert which Debug/Info/Warn lines fired.
+//
+// It is deliberately atomicfile-local rather than a dependency on
+// slogx/capture (the fleet reference implementation): atomicfile is a
+// foundational zero-dep library, and a ~40-line test recorder is not worth a
+// new module edge — the same call auth made with its internal/capture copy.
+// It matches the reference's semantics for the subset atomicfile exercises;
+// the two gaps are deliberate and safe today:
+//
+//   - WithAttrs/WithGroup return the receiver unchanged, so derivation
+//     context is NOT captured; atomicfile never logs through Logger.With or
+//     WithGroup.
+//   - Records are cloned verbatim, not normalized (no LogValuer resolution,
+//     no empty-group elision); atomicfile logs only plain resolved
+//     key-values.
+//
+// If production logging ever adopts With/WithGroup or LogValuer attrs,
+// re-check this helper against slogx/capture's derivation semantics.
 type captureHandler struct {
 	records []slog.Record
 	mu      sync.Mutex
 }
 
+// Enabled reports true for every level so nothing is filtered before capture.
 func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+// Handle records a clone of r. It satisfies slog.Handler.
 func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.records = append(h.records, r.Clone())
 	return nil
 }
+
+// WithAttrs returns the receiver unchanged; base attributes are not captured.
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// WithGroup returns the receiver unchanged; groups are not captured.
+func (h *captureHandler) WithGroup(string) slog.Handler { return h }
+
+// Records returns a locked snapshot copy of the captured records, in order,
+// matching the reference's snapshot-accessor contract (tests never read the
+// raw slice).
+func (h *captureHandler) Records() []slog.Record {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.records)
+}
+
+// CountLevelExact returns how many captured records match both level and
+// message exactly. It is the level-scoped exact matcher for log lines pinned
+// by an external contract (the Loki alert shapes): exact equality on the
+// message per the reference's CountExact rationale — a substring match would
+// false-pass a positive must-emit assertion on a superstring message.
+func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
+	n := 0
+	for _, r := range h.Records() {
+		if r.Level == level && r.Message == message {
+			n++
+		}
+	}
+	return n
+}

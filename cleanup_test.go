@@ -218,7 +218,7 @@ func TestCleanupStaleTemps_RemoveFailure_WarnsWithCount(t *testing.T) {
 	}
 	var warnCount int
 	var failedAttr int64 = -1
-	for _, r := range h.records {
+	for _, r := range h.Records() {
 		if r.Level == slog.LevelWarn {
 			warnCount++
 			r.Attrs(func(a slog.Attr) bool {
@@ -362,10 +362,10 @@ func TestCleanupStaleTemps_RemovedTemps_LogsInfoNotWarn(t *testing.T) {
 	if removed != 1 {
 		t.Fatalf("removed = %d, want 1", removed)
 	}
-	if got := countLogByMessage(h.records, slog.LevelInfo, msgStaleRemoved); got != 1 {
+	if got := h.CountLevelExact(slog.LevelInfo, msgStaleRemoved); got != 1 {
 		t.Errorf("Info %q count = %d, want 1 (removed=1 must log the summary)", msgStaleRemoved, got)
 	}
-	if got := countLogByMessage(h.records, slog.LevelWarn, msgStaleRemoveFail); got != 0 {
+	if got := h.CountLevelExact(slog.LevelWarn, msgStaleRemoveFail); got != 0 {
 		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
 	}
 }
@@ -386,10 +386,10 @@ func TestCleanupStaleTemps_NothingRemoved_DoesNotLogInfo(t *testing.T) {
 	if removed != 0 {
 		t.Fatalf("removed = %d, want 0", removed)
 	}
-	if got := countLogByMessage(h.records, slog.LevelInfo, msgStaleRemoved); got != 0 {
+	if got := h.CountLevelExact(slog.LevelInfo, msgStaleRemoved); got != 0 {
 		t.Errorf("Info %q count = %d, want 0 (removed=0 must not log the summary)", msgStaleRemoved, got)
 	}
-	if got := countLogByMessage(h.records, slog.LevelWarn, msgStaleRemoveFail); got != 0 {
+	if got := h.CountLevelExact(slog.LevelWarn, msgStaleRemoveFail); got != 0 {
 		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
 	}
 }
