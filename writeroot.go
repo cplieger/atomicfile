@@ -279,10 +279,11 @@ func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, 
 // Result.Durable for crash durability. Result.Path is root's directory joined
 // with the cleaned relative name. A nil root returns ErrUnsafePath.
 func WriteFileInRoot(ctx context.Context, root *os.Root, name string, data []byte, opts ...Option) (Result, error) {
-	return writeAtomicInRoot(ctx, root, name, buildCfg(opts), func(tmp *os.File) error {
-		_, err := tmp.Write(data)
-		return err
-	})
+	c := buildCfg(opts)
+	if err := checkWriteCap(int64(len(data)), c.maxBytes); err != nil {
+		return Result{}, err
+	}
+	return writeAtomicInRoot(ctx, root, name, c, writeBytes(data))
 }
 
 // WriteReaderInRoot atomically writes the contents of r to name, a path
@@ -299,14 +300,8 @@ func WriteReaderInRoot(ctx context.Context, root *os.Root, name string, r io.Rea
 	if r == nil {
 		return Result{}, errors.New("atomicfile: nil reader")
 	}
-	return writeAtomicInRoot(ctx, root, name, buildCfg(opts), func(tmp *os.File) error {
-		if wt, ok := r.(io.WriterTo); ok {
-			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: tmp})
-			return err
-		}
-		_, err := io.Copy(tmp, readerCtx{ctx: ctx, r: r})
-		return err
-	})
+	c := buildCfg(opts)
+	return writeAtomicInRoot(ctx, root, name, c, copyReader(ctx, r, c.maxBytes))
 }
 
 // NewPendingFileInRoot creates a temp file destined to atomically replace
