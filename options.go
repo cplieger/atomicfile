@@ -8,6 +8,7 @@ import (
 // cfg holds resolved configuration for an atomic write.
 type cfg struct {
 	logger             *slog.Logger
+	maxBytes           int64
 	mode               os.FileMode
 	mkdirMode          os.FileMode
 	preserveMode       bool
@@ -67,6 +68,21 @@ func WithNoSync() Option {
 // intent.
 func WithAllowSymlinkTarget() Option {
 	return func(c *cfg) { c.allowSymlinkTarget = true }
+}
+
+// WithMaxBytes caps the content size an atomic write will stage, the
+// write-side mirror of ReadBounded's bound: a writer that also owns the
+// reader can refuse to persist a file its own read path would refuse to
+// load, instead of silently writing something that fails open on the next
+// read. WriteFile and WriteFileInRoot reject over-cap content before the
+// temp file is created; WriteReader and WriteReaderInRoot reject the copy
+// chunk that would cross the cap; a PendingFile rejects the
+// Write/WriteString/ReadFrom call that would cross it, whole, so the staged
+// temp never holds an over-cap prefix (see PendingFile.Write). Every
+// rejection matches ErrFileTooLarge and leaves the previous file at the
+// target path intact. n <= 0 means no cap (the default).
+func WithMaxBytes(n int64) Option {
+	return func(c *cfg) { c.maxBytes = n }
 }
 
 func buildCfg(opts []Option) *cfg {

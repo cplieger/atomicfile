@@ -109,7 +109,7 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 - `(*PendingFile).Commit(ctx) (Result, error)` — chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
 - `(*PendingFile).Cleanup() error` — close + remove (abort; no-op after Commit, idempotent). Safe to `defer` immediately after `NewPendingFile`.
 
-`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface; its `Name()` reports the staged temp's path, so an external verifier can inspect the temp before `Commit` publishes it.
+`PendingFile` embeds `*os.File`, providing the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface; its `Name()` reports the staged temp's path, so an external verifier can inspect the temp before `Commit` publishes it. It is written as an append-only stream: `Write`/`WriteString`/`ReadFrom` maintain a byte count (`BytesWritten()`), `Truncate` re-syncs it, and a `WithMaxBytes` cap is enforced on exactly that stream — the call that would cross the cap is rejected whole, so the staged temp never holds an over-cap prefix.
 
 ### Read Functions
 
@@ -143,6 +143,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed |
 | `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)      |
 | `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                        |
+| `WithMaxBytes(n)`          | Cap staged content at `n` bytes — the write-side mirror of `ReadBounded`, so a writer can refuse to persist what its own read path would refuse to load. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap. |
 | `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                                         |
 
 ## Errors
@@ -151,7 +152,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | ------------------ | ------------------------------------------------------------------------------- |
 | `ErrEmptyPath`     | The path argument was empty                                                     |
 | `ErrUnsafePath`    | The path is not absolute or contains a null byte                                |
-| `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit                                  |
+| `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
 | `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write       |
 

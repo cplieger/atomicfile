@@ -110,10 +110,50 @@ func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.Fi
 // with WithMode). A nil error means the data is at path; check Result.Durable
 // for crash durability.
 func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (Result, error) {
-	return writeAtomic(ctx, path, buildCfg(opts), func(tmp *os.File) error {
+	c := buildCfg(opts)
+	if err := checkWriteCap(int64(len(data)), c.maxBytes); err != nil {
+		return Result{}, err
+	}
+	return writeAtomic(ctx, path, c, writeBytes(data))
+}
+
+// checkWriteCap enforces WithMaxBytes for the whole-buffer entry points
+// (WriteFile, WriteFileInRoot). The content size is known up front, so an
+// over-cap write is rejected before any temp file is created.
+func checkWriteCap(size, maxBytes int64) error {
+	if maxBytes > 0 && size > maxBytes {
+		return fmt.Errorf("%w: %d bytes (max %d)", ErrFileTooLarge, size, maxBytes)
+	}
+	return nil
+}
+
+// writeBytes returns a writeData closure that writes data to the temp file.
+// The WithMaxBytes cap is enforced by checkWriteCap in the entry points
+// before the temp exists, so the closure itself is uncapped.
+func writeBytes(data []byte) func(*os.File) error {
+	return func(tmp *os.File) error {
 		_, err := tmp.Write(data)
 		return err
-	})
+	}
+}
+
+// capWriter enforces a byte cap on writes to w. A write that would cross the
+// cap is rejected whole - no byte of it reaches w - with an error matching
+// ErrFileTooLarge, so a staged temp never holds an over-cap prefix.
+type capWriter struct {
+	w       io.Writer
+	limit   int64
+	written int64
+}
+
+func (cw *capWriter) Write(p []byte) (int, error) {
+	if cw.written+int64(len(p)) > cw.limit {
+		return 0, fmt.Errorf("%w: write of %d bytes would grow the file to %d bytes (max %d)",
+			ErrFileTooLarge, len(p), cw.written+int64(len(p)), cw.limit)
+	}
+	n, err := cw.w.Write(p)
+	cw.written += int64(n)
+	return n, err
 }
 
 // readerCtx wraps an io.Reader so each Read observes ctx cancellation, making
@@ -156,14 +196,28 @@ func WriteReader(ctx context.Context, path string, r io.Reader, opts ...Option) 
 	if r == nil {
 		return Result{}, errors.New("atomicfile: nil reader")
 	}
-	return writeAtomic(ctx, path, buildCfg(opts), func(tmp *os.File) error {
+	c := buildCfg(opts)
+	return writeAtomic(ctx, path, c, copyReader(ctx, r, c.maxBytes))
+}
+
+// copyReader returns a writeData closure that streams r into the temp file
+// with per-chunk ctx observation, capping the content at maxBytes when
+// positive: the chunk that would cross the cap is rejected whole with an
+// error matching ErrFileTooLarge, the engine discards the temp, and the
+// previous file at the target path stays intact.
+func copyReader(ctx context.Context, r io.Reader, maxBytes int64) func(*os.File) error {
+	return func(tmp *os.File) error {
+		dst := io.Writer(tmp)
+		if maxBytes > 0 {
+			dst = &capWriter{w: dst, limit: maxBytes}
+		}
 		if wt, ok := r.(io.WriterTo); ok {
-			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: tmp})
+			_, err := wt.WriteTo(writerCtx{ctx: ctx, w: dst})
 			return err
 		}
-		_, err := io.Copy(tmp, readerCtx{ctx: ctx, r: r})
+		_, err := io.Copy(dst, readerCtx{ctx: ctx, r: r})
 		return err
-	})
+	}
 }
 
 // pendingState tracks a PendingFile's terminal lifecycle. A single bool could
@@ -188,6 +242,12 @@ const (
 // before Commit. The configuration is captured at construction and reused at
 // Commit, so durability options cannot drift between the two calls.
 //
+// A PendingFile is written as an append-only stream: Write, WriteString, and
+// ReadFrom maintain a byte count (BytesWritten) that Truncate re-syncs, and a
+// WithMaxBytes cap is enforced on exactly that stream. Operations on the
+// embedded *os.File that step outside the stream model (WriteAt, Write after
+// Seek) bypass both the accounting and the cap.
+//
 // Every filesystem operation (temp creation, rename, parent-dir fsync,
 // removal) runs through an *os.Root: the caller's root for
 // NewPendingFileInRoot, or a root of the target's parent directory that
@@ -211,6 +271,8 @@ type PendingFile struct {
 	dir     string // parent of name inside root, for the commit-side dir fsync
 	tmpName string // temp name, relative to root
 	result  Result
+	limit   int64 // WithMaxBytes cap; <= 0 means uncapped
+	written int64 // bytes staged under the append-stream model; see BytesWritten
 	mode    os.FileMode
 	ownRoot bool // NewPendingFile opened root and must close it at a terminal state
 	state   pendingState
@@ -232,6 +294,7 @@ func newPendingFromRoot(ctx context.Context, root *os.Root, name string, ownRoot
 		name:    cleanName,
 		dir:     dir,
 		tmpName: tmpName,
+		limit:   c.maxBytes,
 		ownRoot: ownRoot,
 		mode:    resolveModeInRoot(root, cleanName, c),
 	}, nil
@@ -253,6 +316,79 @@ func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingF
 	}
 	return pf, nil
 }
+
+// checkCap rejects a write of n more bytes when it would cross the
+// WithMaxBytes cap, before any byte lands.
+func (p *PendingFile) checkCap(n int) error {
+	if p.limit > 0 && p.written+int64(n) > p.limit {
+		return fmt.Errorf("%w: write of %d bytes would grow the staged file to %d bytes (max %d)",
+			ErrFileTooLarge, n, p.written+int64(n), p.limit)
+	}
+	return nil
+}
+
+// Write stages p, enforcing the WithMaxBytes cap when one is set: a write
+// that would cross the cap is rejected whole - no byte of it reaches the
+// temp - with an error matching ErrFileTooLarge, so the staged content never
+// holds an over-cap prefix and a later Commit cannot publish an over-cap
+// file. Accepted bytes advance BytesWritten.
+func (p *PendingFile) Write(b []byte) (int, error) {
+	if err := p.checkCap(len(b)); err != nil {
+		return 0, err
+	}
+	n, err := p.File.Write(b)
+	p.written += int64(n)
+	return n, err
+}
+
+// WriteString applies the same WithMaxBytes cap and byte accounting as Write
+// (the embedded *os.File's own WriteString would bypass both), so
+// io.WriteString and friends stay inside the stream model.
+func (p *PendingFile) WriteString(s string) (int, error) {
+	if err := p.checkCap(len(s)); err != nil {
+		return 0, err
+	}
+	n, err := p.File.WriteString(s)
+	p.written += int64(n)
+	return n, err
+}
+
+// ReadFrom streams r into the staged temp. With a WithMaxBytes cap set it
+// routes every chunk through Write, so the cap and accounting hold; uncapped
+// it delegates to the embedded *os.File's ReadFrom (keeping the OS copy fast
+// path) and records the copied size.
+func (p *PendingFile) ReadFrom(r io.Reader) (int64, error) {
+	if p.limit <= 0 {
+		n, err := p.File.ReadFrom(r)
+		p.written += n
+		return n, err
+	}
+	// The anonymous struct hides this method from io.Copy, forcing the
+	// generic loop (or the source's WriteTo) through the capped Write.
+	return io.Copy(struct{ io.Writer }{p}, r)
+}
+
+// Truncate resizes the staged temp and re-syncs the byte accounting to the
+// new size, keeping the append-stream model coherent for callers that trim a
+// trailing byte after encoding (e.g. dropping json.Encoder's newline before
+// Commit). Growing the file beyond a WithMaxBytes cap is rejected with an
+// error matching ErrFileTooLarge.
+func (p *PendingFile) Truncate(size int64) error {
+	if p.limit > 0 && size > p.limit {
+		return fmt.Errorf("%w: truncate to %d bytes (max %d)", ErrFileTooLarge, size, p.limit)
+	}
+	if err := p.File.Truncate(size); err != nil {
+		return err
+	}
+	p.written = size
+	return nil
+}
+
+// BytesWritten reports the staged file's size under the append-stream model:
+// bytes accepted through Write, WriteString, and ReadFrom, re-synced by
+// Truncate. Operations on the embedded *os.File that step outside the stream
+// model (WriteAt, Write after Seek) are not tracked.
+func (p *PendingFile) BytesWritten() int64 { return p.written }
 
 // closeOwnedRoot closes the parent-directory root when this PendingFile opened
 // it (NewPendingFile). Idempotent: the flag is cleared on the first close. A

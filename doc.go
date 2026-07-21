@@ -21,6 +21,15 @@
 // orphaned temps of exactly that shape and nothing else, so it never deletes
 // a caller-owned file.
 //
+// # Size bounds
+//
+// ReadBounded and ReadBoundedFile refuse to read a file past a byte limit,
+// and WithMaxBytes mirrors that bound on the write side across every write
+// primitive: a writer that also owns the reader can refuse to persist a file
+// its own read path would refuse to load, instead of failing open on the
+// next read. Both directions report ErrFileTooLarge, and a capped write
+// always leaves the previous file at the target path intact.
+//
 // # Confinement
 //
 // Every write runs through an *os.Root: the *InRoot functions use the

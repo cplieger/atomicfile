@@ -8,7 +8,10 @@ var (
 	ErrEmptyPath = errors.New("atomicfile: empty path")
 	// ErrUnsafePath is returned when a path fails the local safety check.
 	ErrUnsafePath = errors.New("atomicfile: unsafe path")
-	// ErrFileTooLarge is returned when a file exceeds the read size limit.
+	// ErrFileTooLarge is returned when a file exceeds the ReadBounded /
+	// ReadBoundedFile size limit, or when content exceeds a WithMaxBytes
+	// write cap (there it arrives wrapped, sometimes inside a *WriteError;
+	// match with errors.Is).
 	ErrFileTooLarge = errors.New("atomicfile: file too large")
 	// ErrSymlinkTarget is returned when the target path is a symlink and
 	// WithAllowSymlinkTarget was not set.
