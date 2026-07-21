@@ -180,7 +180,7 @@ func TestWriteFile_PreserveOwnership_ChownFailure_NonFatal(t *testing.T) {
 		t.Errorf("content = %q, want %q (write must land despite chown failure)", got, "new")
 	}
 	var warns int
-	for _, r := range h.records {
+	for _, r := range h.Records() {
 		if r.Level == slog.LevelWarn {
 			warns++
 		}

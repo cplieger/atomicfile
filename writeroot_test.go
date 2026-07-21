@@ -333,7 +333,7 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	// The non-durable Warn must carry both root and path so an operator using
 	// multiple roots can identify which on-disk file is not durable.
 	var found bool
-	for _, r := range h.records {
+	for _, r := range h.Records() {
 		if r.Level != slog.LevelWarn {
 			continue
 		}
@@ -433,7 +433,7 @@ func TestApplyOwnershipInRoot_ChownFailure_LogsOneWarn(t *testing.T) {
 	applyOwnershipInRoot(root, "ghost", "target", c)
 
 	var warns int
-	for _, r := range h.records {
+	for _, r := range h.Records() {
 		if r.Level == slog.LevelWarn {
 			warns++
 		}
@@ -456,7 +456,7 @@ func TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
 
 	removeTempInRoot(root, "removable.tmp", slog.New(h))
 
-	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 0 {
+	if got := h.CountLevelExact(slog.LevelDebug, msgRemoveTempFailed); got != 0 {
 		t.Errorf("removeTempInRoot(existing removable file) logged %q %d times, want 0", msgRemoveTempFailed, got)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "removable.tmp")); !errors.Is(err, fs.ErrNotExist) {
@@ -482,7 +482,7 @@ func TestRemoveTempInRoot_FailedRemoval_LogsDebug(t *testing.T) {
 
 	removeTempInRoot(root, "busy", slog.New(h))
 
-	if got := countLogByMessage(h.records, slog.LevelDebug, msgRemoveTempFailed); got != 1 {
+	if got := h.CountLevelExact(slog.LevelDebug, msgRemoveTempFailed); got != 1 {
 		t.Errorf("removeTempInRoot(non-empty dir) logged %q %d times, want 1", msgRemoveTempFailed, got)
 	}
 }
