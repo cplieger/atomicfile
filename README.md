@@ -135,26 +135,26 @@ A nil error means the data reached its final path: the write either fully succee
 
 All write functions accept variadic `Option` values. Omit options for defaults.
 
-| Option                     | Description                                                                                                                                        |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                            |
-| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                                                 |
-| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                       |
-| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed |
-| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)      |
-| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                        |
+| Option                     | Description                                                                                                                                                                                                                                               |
+|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                                                   |
+| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                                                                                                                                                        |
+| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                                                                                                                              |
+| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed                                                                                                        |
+| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)                                                                                                             |
+| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                                                                                                                               |
 | `WithMaxBytes(n)`          | Cap staged content at `n` bytes — the write-side mirror of `ReadBounded`, so a writer can refuse to persist what its own read path would refuse to load. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap. |
-| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                                         |
+| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                                                                                                                                                |
 
 ## Errors
 
-| Sentinel           | Meaning                                                                         |
-| ------------------ | ------------------------------------------------------------------------------- |
-| `ErrEmptyPath`     | The path argument was empty                                                     |
-| `ErrUnsafePath`    | The path is not absolute or contains a null byte                                |
+| Sentinel           | Meaning                                                                                        |
+|--------------------|------------------------------------------------------------------------------------------------|
+| `ErrEmptyPath`     | The path argument was empty                                                                    |
+| `ErrUnsafePath`    | The path is not absolute or contains a null byte                                               |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
-| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                |
-| `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write       |
+| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                               |
+| `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                      |
 
 The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.
 
