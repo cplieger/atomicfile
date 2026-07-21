@@ -166,10 +166,12 @@ func (c *seqCancelCtx) Err() error {
 // captureHandler is a slog.Handler that records every emitted record, letting
 // the best-effort logging tests assert which Debug/Info/Warn lines fired.
 //
-// It is deliberately atomicfile-local rather than a dependency on
-// slogx/capture (the fleet reference implementation): atomicfile is a
-// foundational zero-dep library, and a ~40-line test recorder is not worth a
-// new module edge — the same call auth made with its internal/capture copy.
+// It is deliberately atomicfile-local rather than a dependency on the fleet
+// reference implementation, github.com/cplieger/slogx/capture (package
+// capture in the slogx repo — compare against it when changing this helper):
+// atomicfile is a foundational zero-dep library, and a ~40-line test recorder
+// is not worth a new module edge — the same call auth made with its
+// internal/capture copy.
 // It matches the reference's semantics for the subset atomicfile exercises;
 // the two gaps are deliberate and safe today:
 //
