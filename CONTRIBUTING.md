@@ -19,7 +19,7 @@ ordering is the load-bearing invariant of the package:
 6. `fsync` the parent directory.
 
 After a crash the final path holds either the complete old content or the
-complete new content — never a partial write. Step 6 is what makes the
+complete new content, never a partial write. Step 6 is what makes the
 rename itself survive power loss; skipping it (via `WithNoSync()`) keeps
 atomicity but drops durability.
 
@@ -28,16 +28,16 @@ When you touch any write path (`WriteFile`, `WriteReader`,
 preserve this ordering. In particular:
 
 - The temp file is always created in `filepath.Dir(cleanPath)`, never in
-  `os.TempDir()` — a cross-mount rename is not atomic.
+  `os.TempDir()`; a cross-mount rename is not atomic.
 - A hard failure returns a `*WriteError` tagged with the `WritePhase` that
   failed (`PhaseTempCreate`, `PhaseTempWrite`, `PhaseRename`, ...), and a
   `*WriteError` always means the data did NOT reach its final path. Keep new
   hard-failure points tagged. The parent-directory fsync (step 6) is the
   exception: once the rename succeeds the data is present, so a failed dir
-  fsync is **not** a `*WriteError` — it returns a nil error with
+  fsync is **not** a `*WriteError`; it returns a nil error with
   `Result.Durable == false` and a `Warn` log. The "written, but durability
   not guaranteed" state is now a `Result` flag, not a phase. Likewise a
-  preserve-ownership chown failure is best-effort — it logs at `Warn` and lets
+  preserve-ownership chown failure is best-effort: it logs at `Warn` and lets
   the write proceed, so it carries no phase and is not a `*WriteError`.
 - On any error before the rename, the temp file must be cleaned up
   (`removeTemp`). Don't leave orphans.
@@ -48,7 +48,7 @@ preserve this ordering. In particular:
   the `*os.Root` itself refuses any escape) for the `*os.Root`-confined
   writers.
 
-The platform target is **Linux only** — `os.Rename` is not guaranteed
+The platform target is **Linux only**: `os.Rename` is not guaranteed
 atomic on Windows. Don't add Windows-specific rename code; see the
 "Unsupported by Design" table in `README.md` for the full list of
 deliberate non-features.
@@ -131,42 +131,42 @@ gremlins unleash .
 
 ## Test suite conventions
 
-Tests live beside the code (standard Go layout) but split by intent — match
+Tests live beside the code (standard Go layout) but split by intent; match
 the right file when adding cases:
 
 - `write_test.go`, `read_test.go`, `read_boundedfile_test.go`, `path_test.go`,
   `write_pendingfile_test.go`, `write_preserve_test.go`, `cleanup_test.go`,
-  `errors_test.go` — per-concern table-driven unit tests (write paths, bounded
+  `errors_test.go`: per-concern table-driven unit tests (write paths, bounded
   reads via `ReadBounded` and the `*os.Root`-confined `ReadBoundedFile` seam,
   path validation,
   `NewPendingFile` / `Commit`, mode/ownership preservation, temp-cleanup, and
   `*WriteError` / `WritePhase` tagging), plus failure-injection and edge-case
   hardening (erroring readers, temp-cleanup races, symlink refusal).
-- `options_test.go` — guards for variadic `Option` handling, including `nil`
+- `options_test.go`: guards for variadic `Option` handling, including `nil`
   options interleaved with real ones (`buildCfg` skips nils, and the suite
   enforces it).
-- `atomicfile_prop_test.go` — property tests via `pgregory.net/rapid` (the
+- `atomicfile_prop_test.go`: property tests via `pgregory.net/rapid` (the
   one external dependency, test-only).
-- `atomicfile_fuzz_test.go` — fuzz targets (see above).
-- `dirsync_test.go` — parent-dir fsync durability (`Result.Durable`
+- `atomicfile_fuzz_test.go`: fuzz targets (see above).
+- `dirsync_test.go`: parent-dir fsync durability (`Result.Durable`
   propagation) through every durable entry point via the `fsyncDir` seam.
-- `writeroot_test.go` — the `*os.Root`-confined writers (`WriteFileInRoot` /
+- `writeroot_test.go`: the `*os.Root`-confined writers (`WriteFileInRoot` /
   `WriteReaderInRoot`): confinement (symlink / `..` escape refusal),
   preserve-mode/ownership, and dir-fsync durability via the `fsyncRootDir`
   seam.
-- `read_boundedfile_test.go` — `ReadBoundedFile` on an already-open handle,
+- `read_boundedfile_test.go`: `ReadBoundedFile` on an already-open handle,
   including the read-through-an-`*os.Root` seam and the caller-owns-the-handle
   contract.
-- `helpers_test.go` — shared test helpers (`isWindows`, `assertNoTempLeak`,
+- `helpers_test.go`: shared test helpers (`isWindows`, `assertNoTempLeak`,
   `stubFsyncDir`, `stubOsChown`, `plainReader`, capture-handler logging,
   `seqCancelCtx`, ...).
-- `example_test.go` — runnable `Example` functions and the README snippet,
+- `example_test.go`: runnable `Example` functions and the README snippet,
   kept compiling.
-- `atomicfile_bench_test.go` — allocation/throughput benchmarks.
+- `atomicfile_bench_test.go`: allocation/throughput benchmarks.
 
 When you add an `Option` or a new entry point, extend the option and dir-sync
 suites (`options_test.go`, `dirsync_test.go`) so the nil-option guard and
-`Result.Durable` propagation stay covered for the new surface — and, for a new
+`Result.Durable` propagation stay covered for the new surface. For a new
 `*os.Root`-confined entry point, add the matching confinement and
 `fsyncRootDir` cases to `writeroot_test.go`.
 
@@ -184,5 +184,5 @@ changelog line a consumer would read.
 By participating you agree to the org-wide
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report security issues through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md),
 never in a public issue.
