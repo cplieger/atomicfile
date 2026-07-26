@@ -34,6 +34,19 @@
 // and a capped write always leaves the previous file at the target path
 // intact.
 //
+// # Reload staleness
+//
+// FileIdentity answers "is what I loaded still what is on disk?" from a stat
+// alone, for a reader caching a file another process publishes. The correct
+// form of that test is knowledge about this package's write barrier: mtime
+// equality AND os.SameFile identity, because an in-place writer keeps the
+// inode while moving the mtime, and a publish-by-rename installs a different
+// inode that a restore can hand the OLD timestamp. Either leg alone serves
+// stale content for one of the two write mechanisms; a size comparison misses
+// exactly the same-size replacement. It is a comparison primitive, not a
+// policy — degradation states, stat-error handling, and re-stat cadence stay
+// with the caller.
+//
 // # Confinement
 //
 // Every write runs through an *os.Root: the *InRoot functions use the

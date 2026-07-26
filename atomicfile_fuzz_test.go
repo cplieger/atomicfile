@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -222,12 +223,44 @@ func FuzzIsStaleTempName(f *testing.F) {
 	f.Add("config.tmp-backup")
 	f.Add("")
 	f.Add("a.tmp-\x00")
+	// Adversarial shapes promoted from cert-converter's app-side target when its
+	// hand-rolled sweep adopted CleanupStaleTempsInRoot: near-misses that a
+	// prefix/suffix check alone would wave through, and lookalikes that must not be
+	// unlinked. A false positive here deletes a file this package does not own.
+	for _, seed := range []string{
+		".", "..", "x", "existing.pfx",
+		".atomicfile-0.tmp",
+		".atomicfile-109.tmp",
+		".atomicfile-12a3.tmp",
+		"atomicfile-123.tmp",
+		".atomicfile-123.tmp.bak",
+		".atomicfile-123.tmp.tmp",
+		".atomicfile-123.TMP",
+		".atomicfile-\uff11\uff12\uff13.tmp",
+		".atomicfile-1_2.tmp",
+		".atomicfile--1.tmp",
+		".atomicfile-+1.tmp",
+		".atomicfile-1.tmp\n",
+		".atomicfile-1.tmp/../evil",
+		".atomicfile-\x00123.tmp",
+	} {
+		f.Add(seed)
+	}
 
 	f.Fuzz(func(t *testing.T, name string) {
 		got := isStaleTempName(name)
 
-		// Cross-check the structural invariant: a true result requires the exact
-		// ".atomicfile-<digits>.tmp" shape with a non-empty all-digit middle.
+		// An independent oracle, not a restatement of the implementation: the exact
+		// shape this package stages, spelled as a regexp. A structural check that
+		// only inspects the prefix/suffix agrees with a buggy matcher on inputs like
+		// ".atomicfile-\uff11.tmp" (a fullwidth digit is a digit to unicode.IsDigit
+		// but not to this format), which is precisely where an over-broad matcher
+		// starts unlinking files the package never wrote.
+		if want := staleTempNameOracle.MatchString(name); got != want {
+			t.Fatalf("isStaleTempName(%q) = %v, want %v (only .atomicfile-<digits>.tmp is ours to delete)", name, got, want)
+		}
+
+		// The structural invariant still has to hold on a true result.
 		if got {
 			if !strings.HasPrefix(name, tempPrefix) || !strings.HasSuffix(name, tempSuffix) {
 				t.Fatalf("true but %q lacks the package prefix/suffix", name)
@@ -399,3 +432,8 @@ func FuzzWriteFileInRoot(f *testing.F) {
 		}
 	})
 }
+
+// staleTempNameOracle is the exact shape CleanupStaleTemps and
+// CleanupStaleTempsInRoot are willing to unlink, as an independent regexp. ASCII
+// digits only: \d with no unicode class, anchored at both ends.
+var staleTempNameOracle = regexp.MustCompile(`^\.atomicfile-[0-9]+\.tmp$`)

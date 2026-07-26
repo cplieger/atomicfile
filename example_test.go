@@ -158,3 +158,38 @@ func ExampleNewPendingFileInRoot() {
 	fmt.Println(string(data))
 	// Output: confined incremental
 }
+
+func ExampleReadBoundedInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	_ = os.WriteFile(filepath.Join(dir, "cert.pem"), []byte("-----BEGIN..."), 0o600)
+
+	// A root confines every read to this tree: a symlink or ".." in the name cannot
+	// redirect the read outside it.
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+
+	data, _ := atomicfile.ReadBoundedInRoot(context.Background(), root, "cert.pem", 1<<20)
+	fmt.Println(len(data))
+	// Output: 13
+}
+
+func ExampleCleanupStaleTempsInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	// An orphaned temp left by an interrupted write, in a NESTED directory: temps are
+	// staged next to their target, so only a recursive sweep finds this one.
+	nested := filepath.Join(dir, "example.com")
+	_ = os.MkdirAll(nested, 0o750)
+	stale := filepath.Join(nested, ".atomicfile-123456.tmp")
+	_ = os.WriteFile(stale, []byte("partial"), 0o600)
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(stale, old, old)
+
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+
+	res, _ := atomicfile.CleanupStaleTempsInRoot(context.Background(), root, time.Hour, atomicfile.WithRecursive())
+	fmt.Println(res.Removed, res.Failed, res.Unreadable)
+	// Output: 1 0 0
+}

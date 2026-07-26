@@ -119,6 +119,32 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 ### Utilities
 
 - `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)`: remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape (`.atomicfile-<digits>.tmp`) and older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (`.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched. Each candidate is re-checked immediately before removal, so a same-named fresh temp created during the scan is spared.
+- `Identify(info os.FileInfo) FileIdentity` + `Matches` / `Changed` / `Recorded` / `ModTime`: reload-staleness comparison for a reader caching a file another process publishes. See [Reload staleness](#reload-staleness).
+
+## Reload staleness
+
+A process that caches a file written by someone else needs to know, from a stat alone, whether its in-memory copy is still current. The correct test is **mtime equality AND `os.SameFile` identity**, and it is knowledge about this package's write barrier — which is why the primitive lives here:
+
+```go
+// after loading
+id := atomicfile.Identify(info)
+
+// on every poll
+info, err := os.Stat(path)
+if err != nil { /* caller's policy */ }
+if id.Changed(info) {
+	// reload, then re-Identify
+}
+```
+
+Both legs are load-bearing, because two different write mechanisms change a file's content and each defeats one half of the naive check:
+
+- An **in-place** writer (`os.WriteFile`, an editor, truncate-and-write) keeps the same inode and moves the mtime forward. An identity-only check calls that unchanged.
+- A **publish-by-rename** writer — every write in this package — installs a _different_ inode. Normally its mtime differs too, but it need not: a backup restore, `rsync -t`, `tar -xp`, or any re-publication of an archived generation lands new content carrying the old timestamp. An mtime-only check calls that unchanged, and the stale copy is then served until something else happens to touch the file.
+
+Size is deliberately not part of the comparison: a same-size replacement is exactly the case a size check misses, and a differing size is already caught by one of the two legs.
+
+The zero `FileIdentity` records nothing and reports `Changed`, which is the fail direction a cache wants — a spurious reload costs one read, a missed reload serves stale data indefinitely. `FileIdentity` is a comparison primitive, not a policy: degradation states, stat-error handling, and re-stat cadence stay with the caller.
 
 ## Result and Durability
 
