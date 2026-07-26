@@ -140,7 +140,12 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 	defer d.Close()
 
 	cutoff := time.Now().Add(-maxAge)
-	removed, failed, err := reapDir(d, dir, cutoff, c.logger)
+	var failed int
+	if c.recursive {
+		removed, failed, err = reapTree(dir, cutoff, c.logger)
+	} else {
+		removed, failed, err = reapDir(d, dir, cutoff, c.logger)
+	}
 	if err != nil {
 		return removed, err
 	}
@@ -152,4 +157,41 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 			"dir", dir, "failed", failed, "removed", removed)
 	}
 	return removed, nil
+}
+
+// reapTree is reapDir extended over subdirectories, for WithRecursive.
+//
+// It exists so both sweeps expose the same depth choice: a caller whose output tree is
+// nested needs every level swept, because a temp is staged in the SAME directory as its
+// final target, and hand-rolling that walk beside a single-directory library call is what
+// leaves an orphan in a subdirectory nobody swept.
+//
+// A directory it cannot enter is counted as a failure and skipped rather than aborting
+// the walk: a partial sweep is strictly better than none, and the count reaches the
+// caller's warning. Every path stays ambient here, matching this function's siblings —
+// a caller that needs the removals confined against a co-mounting writer wants
+// CleanupStaleTempsInRoot instead.
+func reapTree(dir string, cutoff time.Time, logger *slog.Logger) (removed, failed int, err error) {
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if path == dir {
+				return walkErr
+			}
+			logger.Debug("atomicfile.CleanupStaleTemps: skipping unreadable path", "path", path, "error", walkErr)
+			failed++
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		didRemove, didFail := reapStaleTemp(filepath.Dir(path), d, cutoff, logger)
+		if didRemove {
+			removed++
+		}
+		if didFail {
+			failed++
+		}
+		return nil
+	})
+	return removed, failed, walkErr
 }

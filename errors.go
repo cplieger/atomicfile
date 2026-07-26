@@ -16,6 +16,13 @@ var (
 	// ErrSymlinkTarget is returned when the target path is a symlink and
 	// WithAllowSymlinkTarget was not set.
 	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
+	// ErrNotRegular is returned by ReadBoundedInRoot when the name resolves to
+	// something other than a regular file — a directory, named pipe, device node or
+	// socket. It is a distinct sentinel because a caller that maps failures onto
+	// protocol responses (an HTTP handler answering 400 for a directory but 404 for a
+	// missing file) has to tell this case apart from the others; the error text names
+	// the actual mode for diagnosis. Match with errors.Is.
+	ErrNotRegular = errors.New("atomicfile: not a regular file")
 	// ErrAborted is returned by PendingFile.Commit when the pending file was
 	// already aborted by a prior Cleanup. The temp file was removed and nothing
 	// reached the final path, so Commit reports this rather than a zero-value

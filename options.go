@@ -15,6 +15,7 @@ type cfg struct {
 	preserveOwnership  bool
 	noSync             bool
 	allowSymlinkTarget bool
+	recursive          bool
 }
 
 // Option configures an atomic write operation.
@@ -23,6 +24,24 @@ type Option func(*cfg)
 // WithLogger sets a custom logger. If not provided, slog.Default() is used.
 func WithLogger(l *slog.Logger) Option {
 	return func(c *cfg) { c.logger = l }
+}
+
+// WithRecursive makes a stale-temp sweep descend into subdirectories. It affects
+// CleanupStaleTemps and CleanupStaleTempsInRoot and is ignored by every write entry
+// point.
+//
+// Off by default, and the default is the interesting half: a sweep is a DESTRUCTIVE
+// operation, so how much of the filesystem it touches must be stated at the call site
+// rather than inferred from which function was reached for. Both sweeps therefore behave
+// identically without it — one directory, no descent — and depth is opt-in.
+//
+// Reach for it when temps can be staged below the directory you name. That happens
+// whenever the caller's own output tree is nested, because a temp is always created in
+// the SAME directory as its final target: a write to out/example.com/cert.pfx leaves its
+// orphan in out/example.com, which a flat sweep of out/ never sees. A caller with a flat
+// cache directory does not need it and should not pass it.
+func WithRecursive() Option {
+	return func(c *cfg) { c.recursive = true }
 }
 
 // WithMode sets the permission applied to the written file. Defaults to 0o644.
