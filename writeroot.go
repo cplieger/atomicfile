@@ -40,12 +40,14 @@ func validateRootName(name string) (string, error) {
 // crypto/rand. Every temp this package creates — absolute-path entry points
 // included, since they adapt onto this engine — carries this one name shape,
 // so a single stale-temp sweep reaps every orphan.
-func randomTempName() (string, error) {
+//
+// It cannot fail: crypto/rand.Read is documented never to return an error (it
+// crashes the program if the system source is unusable), so there is no error
+// leg to propagate and TempName can export this without a dead error return.
+func randomTempName() string {
 	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return tempPrefix + strconv.FormatUint(binary.LittleEndian.Uint64(b[:]), 10) + tempSuffix, nil
+	rand.Read(b[:])
+	return tempPrefix + strconv.FormatUint(binary.LittleEndian.Uint64(b[:]), 10) + tempSuffix
 }
 
 // createTempInRoot creates an exclusive temp file in dir (relative to root),
@@ -54,11 +56,7 @@ func randomTempName() (string, error) {
 // by root.OpenFile and surfaced as a PhaseTempCreate WriteError.
 func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
 	for try := 0; ; try++ {
-		base, err := randomTempName()
-		if err != nil {
-			return nil, "", &WriteError{Phase: PhaseTempCreate, Err: err}
-		}
-		name := filepath.Join(dir, base)
+		name := filepath.Join(dir, randomTempName())
 		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			return f, name, nil

@@ -3,6 +3,7 @@ package atomicfile_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,4 +193,113 @@ func ExampleCleanupStaleTempsInRoot() {
 	res, _ := atomicfile.CleanupStaleTempsInRoot(context.Background(), root, time.Hour, atomicfile.WithRecursive())
 	fmt.Println(res.Removed, res.Failed, res.Unreadable)
 	// Output: 1 0 0
+}
+
+func ExampleProbeWritable() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+
+	res, err := atomicfile.ProbeWritable(context.Background(), dir)
+	if err != nil {
+		return // the probe could not be attempted (empty dir, cancelled ctx)
+	}
+	// The stage decides the policy, not the library: this caller refuses to
+	// start when the directory cannot take a write, and only warns when the
+	// write worked but the probe file could not be cleaned up.
+	switch {
+	case !res.Writable():
+		fmt.Println("not writable:", res.Stage, res.Err)
+	case !res.OK():
+		fmt.Println("writable, but cleanup failed:", res.Stage, "leaked:", res.Leaked)
+	default:
+		fmt.Println("writable, nothing left behind")
+	}
+	// The probe file carries this package's temp shape, so a leaked one is
+	// reclaimed by CleanupStaleTemps.
+	fmt.Println(atomicfile.IsPackageTemp(res.Name))
+	// Output:
+	// writable, nothing left behind
+	// true
+}
+
+func ExampleProbeWritableInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	root, _ := os.OpenRoot(dir)
+	defer func() { _ = root.Close() }()
+
+	// Probing through the root a caller already holds checks the same object
+	// its writes will use; "." is the root itself.
+	res, _ := atomicfile.ProbeWritableInRoot(context.Background(), root, ".")
+	fmt.Println(res.OK(), res.Leaked)
+
+	// An escaping name is refused by the root, reported as a stage failure.
+	escaped, _ := atomicfile.ProbeWritableInRoot(context.Background(), root, "../outside")
+	fmt.Println(escaped.Stage, escaped.Writable())
+	// Output:
+	// true false
+	// create probe file false
+}
+
+func ExampleTempName() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+
+	// A caller staging its own file in a directory this package sweeps takes
+	// the name from TempName instead of rebuilding the convention, so an
+	// orphan is reclaimed like any other temp.
+	path := filepath.Join(dir, atomicfile.TempName())
+	_ = os.WriteFile(path, []byte("mine"), 0o600)
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(path, old, old)
+
+	removed, _ := atomicfile.CleanupStaleTemps(dir, time.Hour)
+	fmt.Println(atomicfile.IsPackageTemp(filepath.Base(path)), removed)
+	// Output: true 1
+}
+
+func ExampleWalkDirInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	_ = os.MkdirAll(filepath.Join(dir, "example.com"), 0o750)
+	_ = os.WriteFile(filepath.Join(dir, "example.com", "cert.pfx"), []byte("bundle"), 0o600)
+	// A symlinked directory is reported and never descended, so nothing is
+	// enumerated under a path whose ancestors do not physically hold it.
+	_ = os.Symlink("example.com", filepath.Join(dir, "alias"))
+
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+
+	var found []string
+	_ = atomicfile.WalkDirInRoot(context.Background(), root, func(rel string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A sub-path the walk cannot enter: count it and carry on with the
+			// rest of the tree, or return the error to abort.
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(rel, ".pfx") {
+			found = append(found, rel)
+		}
+		return nil
+	})
+	fmt.Println(found)
+	// Output: [example.com/cert.pfx]
+}
+
+func ExampleRemoveFileInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	_ = os.MkdirAll(filepath.Join(dir, "example.com"), 0o750)
+	_ = os.WriteFile(filepath.Join(dir, "example.com", "cert.pfx"), []byte("bundle"), 0o600)
+
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+
+	// The unlink runs through a parent directory pinned component by component, so
+	// an ancestor swapped for a symlink cannot redirect it at another file in the
+	// tree — which a plain root.Remove of this same name would allow.
+	err := atomicfile.RemoveFileInRoot(root, "example.com/cert.pfx")
+	_, statErr := os.Lstat(filepath.Join(dir, "example.com", "cert.pfx"))
+	fmt.Println(err, os.IsNotExist(statErr))
+	// Output: <nil> true
 }

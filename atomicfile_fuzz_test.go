@@ -250,6 +250,14 @@ func FuzzIsStaleTempName(f *testing.F) {
 	f.Fuzz(func(t *testing.T, name string) {
 		got := isStaleTempName(name)
 
+		// The exported face must be the same predicate, on every input: a
+		// caller asking IsPackageTemp whether its file is reclaimable has to
+		// get the answer the sweeps will act on.
+		if exported := IsPackageTemp(name); exported != got {
+			t.Fatalf("IsPackageTemp(%q) = %v but isStaleTempName = %v; the exported contract drifted from the sweep",
+				name, exported, got)
+		}
+
 		// An independent oracle, not a restatement of the implementation: the exact
 		// shape this package stages, spelled as a regexp. A structural check that
 		// only inspects the prefix/suffix agrees with a buggy matcher on inputs like
@@ -437,3 +445,59 @@ func FuzzWriteFileInRoot(f *testing.F) {
 // CleanupStaleTempsInRoot are willing to unlink, as an independent regexp. ASCII
 // digits only: \d with no unicode class, anchored at both ends.
 var staleTempNameOracle = regexp.MustCompile(`^\.atomicfile-[0-9]+\.tmp$`)
+
+// FuzzProbeWritable drives the writability probe at arbitrary directory names
+// and asserts the two properties a preflight depends on regardless of outcome:
+// a stage failure never arrives as the error return (that would make every
+// caller's `err != nil` mean "not writable"), and the probe never abandons a
+// file it cannot account for — either it removed it, or it says so in Leaked
+// and named it in Name, where the package's own sweep can reclaim it.
+func FuzzProbeWritable(f *testing.F) {
+	f.Add("probe-dir", true)
+	f.Add("probe-dir", false)
+	f.Add("nested/deeper", true)
+	f.Add(".atomicfile-1.tmp", false)
+	f.Add("\x80\x80", true)
+
+	baseDir := f.TempDir()
+	ctx := context.Background()
+
+	f.Fuzz(func(t *testing.T, name string, mkdir bool) {
+		if len(name) == 0 || len(name) > 200 || strings.ContainsRune(name, 0) {
+			return
+		}
+		base := filepath.Base(name)
+		if base == "." || base == ".." || base == "/" {
+			return
+		}
+		dir := filepath.Join(baseDir, base)
+
+		var opts []Option
+		if mkdir {
+			opts = append(opts, WithMkdirMode(0o750))
+		}
+		res, err := ProbeWritable(ctx, dir, opts...)
+		if err != nil {
+			t.Fatalf("ProbeWritable(%q) = err %v; a filesystem outcome must never surface as an error", dir, err)
+		}
+		if (res.Err != nil) != !res.OK() {
+			t.Fatalf("Stage = %v but Err = %v; the two must agree", res.Stage, res.Err)
+		}
+		if res.Name != "" && !IsPackageTemp(res.Name) {
+			t.Fatalf("probe file %q is not reclaimable by the sweep", res.Name)
+		}
+		if res.Leaked && res.OK() {
+			t.Fatalf("OK() with Leaked = true: a clean probe left %q behind", res.Name)
+		}
+
+		entries, readErr := os.ReadDir(dir)
+		if readErr != nil {
+			return // the directory does not exist, so nothing can have leaked into it
+		}
+		for _, e := range entries {
+			if IsPackageTemp(e.Name()) && !res.Leaked {
+				t.Fatalf("probe left %q in %q while reporting Leaked = false", e.Name(), dir)
+			}
+		}
+	})
+}
