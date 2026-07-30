@@ -52,6 +52,31 @@
 // and a capped write always leaves the previous file at the target path
 // intact.
 //
+// # Safe opens
+//
+// OpenRegularInRoot and OpenRegular hand back the OPEN DESCRIPTOR of a file
+// already known to be a regular one, which is the reusable half of the read
+// sequence: open (confined to a root, or refusing a final-component symlink
+// outright), stat the handle rather than the pathname, refuse a directory,
+// FIFO, device node or socket. ReadBoundedInRoot is now literally
+// OpenRegularInRoot plus ReadBoundedFile, so the sequence has one home.
+//
+// A caller that STREAMS the file through a decoder or decryptor never
+// materializes its bytes, and a caller caching the file needs the FileInfo the
+// bytes came from in order to record a FileIdentity; neither can use a
+// []byte-returning helper. Both are the same argument: binding the shape check,
+// the identity and the read to ONE descriptor is what closes the window a
+// second pathname observation opens, where a rename in between lets a caller
+// decode one generation's bytes while recording another's identity and turns
+// every non-regular-file rejection back into a check-then-open race.
+//
+// The two refusals differ because the mechanisms do. The root-confined form
+// bounds where the open can land but still traverses a symlink inside the tree
+// (that is what an *os.Root promises); the ambient form opens O_NOFOLLOW, so
+// the kernel itself refuses a symlink under the name and reports
+// ErrSymlinkTarget, the same vocabulary the write side uses. Neither pins the
+// ancestor components — OpenParentInRoot does that.
+//
 // # Reload staleness
 //
 // FileIdentity answers "is what I loaded still what is on disk?" from a stat
