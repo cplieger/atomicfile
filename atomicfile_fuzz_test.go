@@ -122,6 +122,18 @@ func FuzzValidateAbsClean(f *testing.F) {
 		}
 
 		clean, err := validateAbsClean(path)
+
+		// ValidatePath is the exported face of this same rule, so its verdict
+		// must be identical for every input — otherwise a caller's acceptance
+		// check and the write it guards disagree.
+		exported := ValidatePath(path)
+		switch {
+		case (exported == nil) != (err == nil):
+			t.Fatalf("ValidatePath(%q) = %v but validateAbsClean = %v; the exported gate must be the same rule", path, exported, err)
+		case exported != nil && exported.Error() != err.Error():
+			t.Fatalf("ValidatePath(%q) = %q, want the validator's own %q", path, exported, err)
+		}
+
 		if wantErr {
 			if err == nil {
 				t.Fatalf("validateAbsClean(%q) = %q, nil error; want rejection", path, clean)

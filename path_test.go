@@ -5,8 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestValidateAbsClean(t *testing.T) {
@@ -79,6 +82,148 @@ func TestValidateAbsClean(t *testing.T) {
 			t.Fatalf("validateAbsClean(null suffix) = %v, want ErrUnsafePath", err)
 		}
 	})
+}
+
+// TestValidatePath covers the exported gate: the same verdicts as the private
+// validator behind it (absolute accepted, relative / empty / NUL rejected with
+// the sentinel the write path returns), plus the delegation itself — every case
+// asserts that ValidatePath and validateAbsClean agree, so the two can never
+// become two rules.
+func TestValidatePath(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		wantErr error
+		name    string
+		path    string
+	}{
+		{name: "accepts_absolute_path", path: "/tmp/test.txt"},
+		{name: "accepts_absolute_path_needing_clean", path: "/tmp//sub/./test.txt"},
+		// Clean normalizes ".." in an absolute path: accepted, and documented
+		// as not being a containment boundary.
+		{name: "accepts_absolute_path_with_traversal", path: "/foo/../etc/passwd"},
+		{name: "rejects_relative_path", path: "relative/path", wantErr: ErrUnsafePath},
+		{name: "rejects_bare_relative_name", path: "file.txt", wantErr: ErrUnsafePath},
+		{name: "rejects_empty_path", path: "", wantErr: ErrEmptyPath},
+		{name: "rejects_null_byte", path: "/tmp/foo\x00bar", wantErr: ErrUnsafePath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ValidatePath(tc.path)
+
+			// One rule, one implementation: the exported gate must return
+			// exactly what the write path's validator returns.
+			_, want := validateAbsClean(tc.path)
+			switch {
+			case (got == nil) != (want == nil):
+				t.Fatalf("ValidatePath(%q) = %v but validateAbsClean(%q) = %v; the exported gate must be the same rule the write path applies",
+					tc.path, got, tc.path, want)
+			case got != nil && got.Error() != want.Error():
+				t.Errorf("ValidatePath(%q) = %q, want the validator's own %q", tc.path, got, want)
+			}
+
+			if tc.wantErr == nil {
+				if got != nil {
+					t.Errorf("ValidatePath(%q) = %v, want nil", tc.path, got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.wantErr) {
+				t.Errorf("ValidatePath(%q) = %v, want %v", tc.path, got, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidatePathPerformsNoFilesystemIO pins the property that separates
+// ValidatePath from ProbeWritable: the gate inspects the string and consults
+// nothing on disk. Every path below is one an implementation that stat-ed,
+// opened, or staged a file could not accept — a name that does not exist, a
+// name whose parent is a regular file (any open of it is ENOTDIR), a name under
+// a directory that does not exist, a directory, a FIFO (a blocking open never
+// returns), and an existing file a create-and-remove probe would have
+// truncated. The directory is snapshotted around the batch, and the seeded
+// file's content and identity re-checked, so a staged temp or a touched file
+// would surface even if the verdicts stayed nil.
+func TestValidatePathPerformsNoFilesystemIO(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	seeded := filepath.Join(dir, "seeded.txt")
+	if err := os.WriteFile(seeded, []byte("untouched"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	info, err := os.Stat(seeded)
+	if err != nil {
+		t.Fatalf("stat seed: %v", err)
+	}
+	id := Identify(info)
+
+	paths := []string{
+		filepath.Join(dir, "does-not-exist.txt"),
+		filepath.Join(seeded, "parent-is-a-regular-file.txt"),
+		filepath.Join(dir, "no-such-dir", "deep", "name.txt"),
+		dir,
+		seeded,
+	}
+	fifo := filepath.Join(dir, "pipe")
+	if mkErr := syscall.Mkfifo(fifo, 0o600); mkErr != nil {
+		t.Logf("mkfifo unsupported here (%v); the blocking-open case is skipped", mkErr)
+	} else {
+		paths = append(paths, fifo)
+	}
+
+	before := dirEntryNames(t, dir)
+
+	// An implementation that opened the FIFO would block until a writer
+	// arrived, so the batch runs off the test goroutine: a hang becomes a
+	// failure here instead of a wedged package.
+	errs := make([]error, len(paths))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i, path := range paths {
+			errs[i] = ValidatePath(path)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ValidatePath did not return within 10s; it must not open the path (a FIFO open blocks until a writer arrives)")
+	}
+	for i, path := range paths {
+		if errs[i] != nil {
+			t.Errorf("ValidatePath(%q) = %v, want nil (the gate reads the string, not the filesystem)", path, errs[i])
+		}
+	}
+
+	if after := dirEntryNames(t, dir); !slices.Equal(before, after) {
+		t.Errorf("directory entries changed: before %v, after %v", before, after)
+	}
+	assertNoTempLeak(t, dir)
+	assertContent(t, seeded, "untouched")
+	nowInfo, err := os.Stat(seeded)
+	if err != nil {
+		t.Fatalf("re-stat seed: %v", err)
+	}
+	if !id.Matches(nowInfo) {
+		t.Error("seeded file identity changed (mtime or inode); ValidatePath must not touch it")
+	}
+}
+
+// dirEntryNames returns dir's entry names in ReadDir order, for a before/after
+// comparison that fails on anything created or removed.
+func dirEntryNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q) = %v, want nil", dir, err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	return names
 }
 
 func TestSymlinkTarget(t *testing.T) {
