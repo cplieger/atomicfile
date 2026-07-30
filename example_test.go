@@ -2,6 +2,7 @@ package atomicfile_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -302,4 +303,52 @@ func ExampleRemoveFileInRoot() {
 	_, statErr := os.Lstat(filepath.Join(dir, "example.com", "cert.pfx"))
 	fmt.Println(err, os.IsNotExist(statErr))
 	// Output: <nil> true
+}
+
+func ExampleOpenRegularInRoot() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	_ = os.WriteFile(filepath.Join(dir, "feed.json"), []byte(`{"items":[]}`), 0o600)
+
+	root, _ := os.OpenRoot(dir)
+	defer root.Close()
+
+	// One descriptor carries the shape check, the identity and the bytes. A
+	// caller streaming the file (through a decoder, a decryptor) uses f and
+	// never materializes it; this one reads it under a cap.
+	f, info, err := atomicfile.OpenRegularInRoot(root, "feed.json")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	// The FileInfo came from the descriptor the bytes come from, so recording
+	// it needs no second stat of the pathname.
+	id := atomicfile.Identify(info)
+	data, _ := atomicfile.ReadBoundedFile(context.Background(), f, 1<<20)
+	fmt.Println(len(data), id.Recorded())
+	// Output: 12 true
+}
+
+func ExampleOpenRegular() {
+	dir, _ := os.MkdirTemp("", "example")
+	defer os.RemoveAll(dir)
+	target := filepath.Join(dir, "state.json")
+	_ = os.WriteFile(target, []byte(`{}`), 0o600)
+	link := filepath.Join(dir, "state-link.json")
+	_ = os.Symlink(target, link)
+
+	f, _, err := atomicfile.OpenRegular(target)
+	if err == nil {
+		f.Close()
+	}
+	fmt.Println("regular file:", err)
+
+	// O_NOFOLLOW has the kernel refuse a symlink under the name, so there is no
+	// check-then-open window. ReadBounded still follows links by design.
+	_, _, err = atomicfile.OpenRegular(link)
+	fmt.Println("symlink:", errors.Is(err, atomicfile.ErrSymlinkTarget))
+	// Output:
+	// regular file: <nil>
+	// symlink: true
 }

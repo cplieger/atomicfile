@@ -115,6 +115,10 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 
 - `ReadBounded(ctx, path, maxBytes) ([]byte, error)`: size-checked read; returns `ErrFileTooLarge` past the limit
 - `ReadBoundedFile(ctx, f, maxBytes) ([]byte, error)`: size-checked read from an already-open `*os.File` (the seam for reading a file opened through an `*os.Root`); the caller owns and closes `f`
+- `OpenRegularInRoot(root, name) (*os.File, os.FileInfo, error)`: the open half of `ReadBoundedInRoot`, which is now literally this plus `ReadBoundedFile`. Opens `name` through the root read-only and non-blocking, stats the OPEN HANDLE rather than the pathname, and refuses a directory, FIFO, device node or socket with `ErrNotRegular`. The caller owns and closes the descriptor.
+- `OpenRegular(path) (*os.File, os.FileInfo, error)`: the ambient-path sibling, for a full path into a directory the caller trusts. `O_NOFOLLOW` makes the **kernel** refuse a symlink under the name (`ErrSymlinkTarget`), which no check-then-open sequence can do without a race; the path itself goes through the `ValidatePath` rule. This does not change `ReadBounded`, which still follows symlinks by design.
+
+Both openers exist because the **descriptor** is what a consumer cannot rebuild from bytes: a caller streaming the file through a decoder or decryptor never materializes it, and a caller caching the file needs the `FileInfo` the bytes came from to record a [`FileIdentity`](#reload-staleness). Binding the shape check, the identity and the read to ONE descriptor is the point — a second stat of the pathname lets a rename in between decode one generation's bytes while recording another's identity, and turns every non-regular-file rejection back into a check-then-open race. Neither opener pins the _ancestor_ components; `OpenParentInRoot` does that.
 
 ### Confined Traversal and Removal
 
@@ -224,7 +228,8 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrEmptyPath`     | The path argument was empty                                                                    |
 | `ErrUnsafePath`    | The path is not absolute or contains a null byte                                               |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
-| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set                               |
+| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set; or `OpenRegular` refused one |
+| `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named             |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                      |
 
 The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.
@@ -245,7 +250,7 @@ To opt in to writing through a symlink (replacing the symlink with a regular fil
 > becomes a no-op for such links (the write itself still replaces the link).
 > Links resolving within the parent directory are followed as normal.
 
-Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself: open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root.
+Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself: open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root. `OpenRegularInRoot` is that open, already written; `OpenRegular` is the ambient-path form for a caller holding a full path into a directory it trusts, and it is the one read entry point that does refuse a symlink under the name — `O_NOFOLLOW` has the kernel refuse the open, which a check-then-open sequence cannot do without a race.
 
 An `*os.Root` is not the whole answer for a _multi-component_ name, because it follows a symlink component that stays inside its tree: two operations on one such path can land on two different files if an ancestor directory is swapped in between. `OpenParentInRoot` and `RemoveFileInRoot` pin the ancestors — see [Confined Traversal and Removal](#confined-traversal-and-removal).
 
