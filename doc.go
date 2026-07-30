@@ -27,6 +27,18 @@
 // whether a name is one, so the agreement is a contract a test can pin rather
 // than a convention rebuilt from os.CreateTemp's undocumented substitution.
 //
+// # Path validation
+//
+// ValidatePath is the acceptance check the absolute-path entry points apply,
+// exported for callers that have to accept or refuse a path long before they
+// write to it — a config value read at startup, a CLI flag, a request field.
+// filepath.IsAbs is the usual stand-in and admits a path with an embedded NUL
+// that every write here refuses, so validating with it accepts input the write
+// path rejects later. The exported gate delegates to the same private validator
+// the writes use, so the two verdicts cannot drift; it touches nothing on disk,
+// which also means a nil answer says the path is well formed, not that a write
+// will succeed (that is ProbeWritable's question).
+//
 // # Writability probes
 //
 // ProbeWritable and ProbeWritableInRoot answer "can this process actually
