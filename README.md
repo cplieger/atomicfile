@@ -116,10 +116,44 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 - `ReadBounded(ctx, path, maxBytes) ([]byte, error)`: size-checked read; returns `ErrFileTooLarge` past the limit
 - `ReadBoundedFile(ctx, f, maxBytes) ([]byte, error)`: size-checked read from an already-open `*os.File` (the seam for reading a file opened through an `*os.Root`); the caller owns and closes `f`
 
+### Confined Traversal and Removal
+
+An `*os.Root` confines a path but does not _pin_ it: a root deliberately follows a symlink component that stays inside its tree, so a multi-component name that is stat-ed and then operated on can address two different files if an ancestor directory is swapped for a symlink in between. Confinement still holds (nothing outside the root is reachable) and the operation lands somewhere inside the tree the caller never inspected. These two close that gap for callers working in a tree others can write to — a co-mounted Docker volume, a shared NFS export.
+
+- `WalkDirInRoot(ctx, root, fn fs.WalkDirFunc) error`: stream a confined tree. Each directory is read in fixed 256-entry `ReadDir` batches instead of one materialized (and sorted) inventory, exactly ONE directory handle is open at a time (what the walk carries between directories is a queue of names), each directory is opened `O_DIRECTORY` so a named pipe swapped in for a directory is refused with `ENOTDIR` rather than blocking the caller's goroutine in `open(2)`, and a symlinked directory is never descended. The callback is an `fs.WalkDirFunc`, called exactly as `fs.WalkDir` calls one — the root first as `"."`, then each entry pre-order, a directory that cannot be opened or finished reported through the callback for its own path, `fs.SkipDir`/`fs.SkipAll` honoured. Two deliberate differences: entries arrive in **directory order** (sorted within a batch only, because a global sort is the materialization this avoids), and a directory's own entries are all visited before the walk descends into its subdirectories. The walk stops between batches once `ctx` is done; a caller wanting per-entry cancellation checks `ctx` in the callback. Walk a subtree by passing `root.OpenRoot(sub)`.
+- `OpenParentInRoot(root, name) (parent *os.Root, base string, err error)`: open `name`'s parent directory as its own root, pinned. Every component is `Lstat`-ed (a symlink is refused, not followed), required to be a real directory, opened as a root, and confirmed with `os.SameFile` against the directory that was inspected, so a component replaced mid-open is refused too. Naming only `base` through `parent` afterwards removes every ancestor from the operation's path. The returned root is **always** a fresh handle the caller closes — including for a flat `name`, where it is a second handle on the root's own directory — so the close is unconditional and never closes the caller's root. A vanished component matches `fs.ErrNotExist` (the benign racing-deletion case), a refused one does not.
+- `RemoveFileInRoot(root, name) error`: that descent applied to an unlink. Only a regular file is removed; a directory, symlink, device node, socket or FIFO wearing the name is refused with `ErrNotRegular` and left as found. A missing file is reported (`fs.ErrNotExist`) rather than swallowed — whether an already-gone name is success is the caller's judgement.
+
+`CleanupStaleTempsInRoot` uses both: it enumerates through `WalkDirInRoot` (so a large or hostile directory is not materialized before the sweep sees its first entry) and unlinks every candidate through a pinned parent.
+
 ### Utilities
 
 - `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)`: remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape (`.atomicfile-<digits>.tmp`) and older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (`.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched. Each candidate is re-checked immediately before removal, so a same-named fresh temp created during the scan is spared.
 - `Identify(info os.FileInfo) FileIdentity` + `Matches` / `Changed` / `Recorded` / `ModTime`: reload-staleness comparison for a reader caching a file another process publishes. See [Reload staleness](#reload-staleness).
+- `TempName() string` and `IsPackageTemp(name string) bool`: the temp-name convention as a contract. `TempName` returns a fresh name of the exact shape the sweeps reclaim; `IsPackageTemp` reports whether a directory entry's name is one. Use them instead of rebuilding `.atomicfile-<digits>.tmp` by hand — `os.CreateTemp(dir, ".atomicfile-*.tmp")` only matches because Go happens to substitute decimal digits for `*`, which its documentation does not promise.
+
+### Writability Probe
+
+- `ProbeWritable(ctx, dir, opts ...Option) (ProbeResult, error)`: prove a directory is genuinely writable by doing what a write does — create a temp file, write and flush a byte, close it, unlink it — and report which stage failed. `dir` may be relative; `WithMkdirMode` creates it first, `WithNoSync` skips the flush.
+- `ProbeWritableInRoot(ctx, root, name, opts ...Option) (ProbeResult, error)`: the same probe confined to an `*os.Root` (`name` is relative to it, `"."` for the root itself), for a caller that already holds a root over the directory it is about to write to. An escaping name is refused by the root.
+
+```go
+type ProbeResult struct {
+	Err    error      // the failure from Stage, unwrapped to the filesystem error
+	Dir    string     // directory probed
+	Name   string     // probe file's base name; always satisfies IsPackageTemp
+	Stage  ProbeStage // first stage that failed, or ProbeStageNone
+	Leaked bool       // probe file still on disk
+}
+```
+
+A stat of the mode bits is not an answer: an NFS or FUSE mount, a read-only bind mount, and a Docker volume owned by another UID all present a writable-looking directory that refuses the first write. The stages are the whole ladder (`ProbeStageMkdir`, `Create`, `Write`, `Sync`, `Close`, `Remove`), because a filesystem can accept the directory entry yet reject the first data write, surface a delayed failure only at sync or close, or accept everything and deny the unlink.
+
+**Policy stays with the caller.** A stage failure is reported in the `ProbeResult`, never as the error return — `err != nil` means only that the probe could not be attempted (empty `dir`, cancelled context). `res.OK()` is the everything-passed answer; `res.Writable()` is the split for a caller that wants to warn about a failed cleanup and keep running, since a failure at `ProbeStageClose` or later still proves the directory took the bytes.
+
+The probe file is named with `TempName()`, so a probe orphaned by a crash — or left behind by a directory that denies the unlink — is reclaimed by `CleanupStaleTemps` like any other temp, by construction rather than by a naming convention each caller reproduces.
+
+`ctx` is checked once, before anything is created; the stages are single filesystem calls the OS does not make interruptible, and a probe that has begun always runs its own cleanup, so guard a possibly-wedged mount with your own timeout around the call.
 
 ## Reload staleness
 
@@ -212,6 +246,8 @@ To opt in to writing through a symlink (replacing the symlink with a regular fil
 > Links resolving within the parent directory are followed as normal.
 
 Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself: open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root.
+
+An `*os.Root` is not the whole answer for a _multi-component_ name, because it follows a symlink component that stays inside its tree: two operations on one such path can land on two different files if an ancestor directory is swapped in between. `OpenParentInRoot` and `RemoveFileInRoot` pin the ancestors — see [Confined Traversal and Removal](#confined-traversal-and-removal).
 
 ## Unsupported by Design
 

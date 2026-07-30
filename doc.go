@@ -21,6 +21,24 @@
 // orphaned temps of exactly that shape and nothing else, so it never deletes
 // a caller-owned file.
 //
+// That shape is part of the API, not an implementation detail, because a
+// caller staging its own file in a swept directory has to agree with it:
+// TempName produces a name the sweeps reclaim and IsPackageTemp reports
+// whether a name is one, so the agreement is a contract a test can pin rather
+// than a convention rebuilt from os.CreateTemp's undocumented substitution.
+//
+// # Writability probes
+//
+// ProbeWritable and ProbeWritableInRoot answer "can this process actually
+// write here?" — the preflight question a stat of the mode bits gets wrong on
+// an NFS or FUSE mount, a read-only bind mount, or a Docker volume owned by
+// another UID. They walk the full ladder a real write walks (mkdir, create,
+// write, sync, close, remove) and report which stage failed in a ProbeResult
+// rather than as an error, so a caller that warns on a failed cleanup and one
+// that treats it as fatal both get what they need. The probe file carries the
+// package temp shape, so a probe leaked by a crash is swept like any other
+// orphan.
+//
 // # Size bounds
 //
 // ReadBounded and ReadBoundedFile refuse to read a file past a byte limit,
@@ -53,4 +71,31 @@
 // caller's root directly, and the absolute-path functions open the target's
 // parent directory as a root and write through it. The absolute-path surface
 // is therefore a thin adapter over one confined write engine.
+//
+// # Confined traversal and removal
+//
+// An *os.Root confines a path but does not PIN it: a root deliberately follows
+// a symlink component that stays inside its tree, so a multi-component name
+// that is stat-ed and then operated on can address two different files if an
+// ancestor directory is swapped for a symlink in between. Confinement still
+// holds — nothing outside the root is reachable — and inside the tree the
+// operation lands somewhere the caller never inspected.
+//
+// OpenParentInRoot closes that window: it descends component by component,
+// refusing a symlink and confirming each directory's identity with
+// os.SameFile, and hands back the leaf's own pinned root plus its base name,
+// so the operation that follows names no ancestor at all. RemoveFileInRoot is
+// that descent applied to an unlink, and CleanupStaleTempsInRoot now reclaims
+// every temp through it.
+//
+// WalkDirInRoot is the traversal counterpart to WriteFileInRoot and
+// ReadBoundedInRoot, for a caller enumerating a tree it does not own: entries
+// stream in fixed ReadDir batches rather than one materialized (and sorted)
+// inventory per directory, exactly one directory handle is open at a time, each
+// directory is opened O_DIRECTORY so a planted FIFO is refused instead of
+// blocking the caller's goroutine, and a symlinked directory is never
+// descended. The callback is an fs.WalkDirFunc and the fs.SkipDir/fs.SkipAll
+// sentinels behave as they do in fs.WalkDir; the two deliberate differences
+// are that entries arrive in directory order (sorted within a batch only) and
+// that a directory's own entries are all visited before the walk descends.
 package atomicfile

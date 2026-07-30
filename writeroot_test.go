@@ -362,10 +362,7 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 func TestRandomTempName_ReapableShape(t *testing.T) {
 	t.Parallel()
 	for range 1000 {
-		name, err := randomTempName()
-		if err != nil {
-			t.Fatalf("randomTempName: %v", err)
-		}
+		name := randomTempName()
 		if !isStaleTempName(name) {
 			t.Fatalf("randomTempName produced %q, which CleanupStaleTemps would not reap", name)
 		}
