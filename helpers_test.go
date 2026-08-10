@@ -23,6 +23,8 @@ const (
 	msgRemoveTempFailed = "atomicfile: temp file cleanup failed"
 	msgStaleRemoved     = "atomicfile.CleanupStaleTemps: removed stale temps"
 	msgStaleRemoveFail  = "atomicfile.CleanupStaleTemps: some stale temps could not be removed"
+
+	msgPrivateDirRepaired = "atomicfile: created directory did not keep the requested mode; repaired"
 )
 
 // replaceWithNonEmptyDir deletes the file at path and puts a non-empty
