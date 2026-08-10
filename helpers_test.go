@@ -231,3 +231,30 @@ func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
 	}
 	return n
 }
+
+// writeFileExact writes content to path and then CHMODs it to mode, for the same
+// reason mkdirExact exists: a create mode is a request. Measured on the ZFS
+// nfs4acl dataset this library is developed on, os.WriteFile(path, b, 0o600)
+// stores 0770 — so does the O_CREATE|O_EXCL in createTempInRoot, which is why
+// that now enforces its own mode too. A WithPreserveMode fixture built from the
+// create mode alone is therefore asserting against whatever the host filesystem
+// felt like storing: the write correctly preserves the 0770 actually on disk,
+// and the test fails claiming the library lost a mode the fixture never
+// established. chmod(2) IS honoured on that dataset, so it is the call that
+// makes a fixture mean what it says.
+func writeFileExact(t *testing.T, path string, content []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, content, mode); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatalf("chmod %s to %#o: %v", path, mode, err)
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("lstat %s: %v", path, err)
+	}
+	if got := fi.Mode().Perm(); got != mode.Perm() {
+		t.Fatalf("fixture %s is mode %#o, want %#o: the filesystem refuses the mode this case needs", path, got, mode.Perm())
+	}
+}

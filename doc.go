@@ -104,6 +104,14 @@
 // are the same call, and it observes no pathname — a chmod-then-stat by name can
 // chmod one object and certify another.
 //
+// The write path uses it on itself, in two places. The staging file is created
+// owner-only and PROVED owner-only before the caller's payload goes into it —
+// the temp has to share the target's parent directory, so on a widening
+// filesystem it would otherwise hold the payload group-readable and
+// group-writable for the whole write. Then WithMode's mode is enforced rather
+// than merely requested before the rename publishes it, so a filesystem that
+// refuses the mode fails the write instead of publishing a wider file.
+//
 // EnsurePrivateDir is the custody composition around it, for a process
 // establishing a directory only its own user may enter inside a parent others can
 // write: mkdir 0700 recording whether THIS call created it, open

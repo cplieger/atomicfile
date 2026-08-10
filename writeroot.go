@@ -54,11 +54,38 @@ func randomTempName() string {
 // retrying on the rare random-name collision the way os.CreateTemp does. It
 // returns the open file and its root-relative name. An escaping dir is refused
 // by root.OpenFile and surfaced as a PhaseTempCreate WriteError.
+//
+// It creates the staging file owner-only and PROVES it is owner-only before
+// returning it to be written into.
+//
+// The 0o600 in the open is only a request, and on a filesystem carrying an
+// inheritable group ACL the kernel stores something wider: measured on a ZFS
+// nfs4acl dataset, this exact O_CREATE|O_EXCL with 0o600 stores 0770. The temp
+// lives in the TARGET's parent directory — it has to, because publishing is a
+// same-filesystem rename — so that parent is as reachable as the target is, and
+// a wider mode is not a cosmetic detail: the caller's payload is written into
+// this descriptor AFTER this function returns. Without the enforcement here, a
+// secret written through WithMode(0o600) sits group-readable AND group-writable
+// for the entire duration of the write, and is only narrowed afterwards by
+// finalizeTempFile. Group-writable is the worse half — the bytes that get
+// renamed into place are then not necessarily the bytes the caller wrote.
+//
+// So the mode is enforced on the handle at creation, before any data exists,
+// and the caller's own mode is enforced again at the end of the write. The
+// random name is not a substitute: it makes the temp hard to GUESS, while the
+// mode is what makes it unreachable once found in a listable directory.
 func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
 	for try := 0; ; try++ {
 		name := filepath.Join(dir, randomTempName())
 		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
+			if _, mErr := EnforceMode(f, 0o600); mErr != nil {
+				f.Close()
+				// The temp is this function's to clean up: the caller never saw
+				// it, so nothing else will remove it.
+				_ = root.Remove(name)
+				return nil, "", &WriteError{Phase: PhaseTempCreate, Err: mErr}
+			}
 			return f, name, nil
 		}
 		if errors.Is(err, fs.ErrExist) && try < 10000 {

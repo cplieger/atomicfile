@@ -21,9 +21,7 @@ func TestPreserveMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "preserve.txt")
-		if err := os.WriteFile(path, []byte("old"), 0o755); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		writeFileExact(t, path, []byte("old"), 0o755)
 		if _, err := WriteFile(context.Background(), path, []byte("new"), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -50,9 +48,7 @@ func TestPreserveMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "reader.txt")
-		if err := os.WriteFile(path, []byte("old"), 0o750); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		writeFileExact(t, path, []byte("old"), 0o750)
 		if _, err := WriteReader(context.Background(), path, strings.NewReader("new"), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
@@ -66,9 +62,7 @@ func TestPreserveMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "pf.txt")
-		if err := os.WriteFile(path, []byte("old"), 0o750); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		writeFileExact(t, path, []byte("old"), 0o750)
 		pf, err := NewPendingFile(context.Background(), path, WithMode(0o644), WithPreserveMode())
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
@@ -94,9 +88,7 @@ func TestPreserveMode_OverridesExplicitMode(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pm.txt")
-	if err := os.WriteFile(path, []byte("old"), 0o751); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	writeFileExact(t, path, []byte("old"), 0o751)
 	// WithPreserveMode takes priority over an explicit WithMode for an existing target.
 	if _, err := WriteFile(context.Background(), path, []byte("new"),
 		WithMode(0o600), WithPreserveMode()); err != nil {
@@ -131,9 +123,7 @@ func TestPreserveOwnership(t *testing.T) {
 		}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "owned.txt")
-		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		writeFileExact(t, path, []byte("old"), 0o644)
 		// Chowning to the current owner is a no-op that succeeds for any user.
 		if _, err := WriteFile(context.Background(), path, []byte("new"), WithPreserveOwnership()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
@@ -157,9 +147,7 @@ func TestWriteFile_PreserveOwnership_ChownFailure_NonFatal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data.txt")
 	// Pre-create the target so applyOwnership stats it and reaches the chown.
-	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-		t.Fatalf("seed target: %v", err)
-	}
+	writeFileExact(t, path, []byte("old"), 0o644)
 	sentinel := errors.New("injected chown failure")
 	stubRootChown(t, sentinel)
 

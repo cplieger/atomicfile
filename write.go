@@ -89,7 +89,14 @@ func finalizeTempFile(ctx context.Context, tmp *os.File, mode os.FileMode, c *cf
 			return fmt.Errorf("%w: staged file is %d bytes (max %d)", ErrFileTooLarge, fi.Size(), c.maxBytes)
 		}
 	}
-	if err := tmp.Chmod(mode); err != nil {
+	// EnforceMode, not tmp.Chmod: a mode argument is a REQUEST, and this package
+	// spent a whole primitive establishing that. Stopping at the chmod would mean
+	// WithMode(0o600) is a request too, so a filesystem that refuses the mode
+	// would publish a wider file and this call would report success — the exact
+	// defect EnforceMode exists to make impossible, in the package that owns it.
+	// The handle is what makes it sound: fchmod and fstat on one descriptor,
+	// which the pending rename cannot redirect.
+	if _, err := EnforceMode(tmp, mode); err != nil {
 		tmp.Close()
 		return &WriteError{Phase: PhaseTempChmod, Err: err}
 	}
