@@ -130,6 +130,42 @@ An `*os.Root` confines a path but does not _pin_ it: a root deliberately follows
 
 `CleanupStaleTempsInRoot` uses both: it enumerates through `WalkDirInRoot` (so a large or hostile directory is not materialized before the sweep sees its first entry) and unlinks every candidate through a pinned parent.
 
+### Private Directories and Enforced Modes
+
+- `EnforceMode(f *os.File, want os.FileMode) (os.FileMode, error)`: `fchmod` the **open handle** to `want`, then `fstat` the same handle and return the mode the filesystem actually **stored**; a mismatch is `ErrModeNotStored`, naming both modes. Works for a file or a directory, since both are an `*os.File`.
+- `EnsurePrivateDir(dir string, opts ...Option) (PrivateDir, error)`: establish custody of **one** directory level only the effective uid may enter — `mkdir` 0700, open `O_DIRECTORY|O_NOFOLLOW`, `fstat` the handle, require the owner uid, repair the mode if we created it, refuse it if we did not.
+
+```go
+type PrivateDir struct {
+	Mode     os.FileMode // the mode the filesystem stored, read back from the handle
+	Created  bool        // this call created the directory
+	Repaired bool        // the created directory's mode had to be corrected
+}
+```
+
+A mode argument to `mkdir(2)` or `open(2)` is a **request**, not a result. `umask` narrows it, and a filesystem carrying an inheritable ACL can widen the outcome regardless of what was asked — measured on a ZFS `nfs4acl` dataset, an inheritable `group@:rwx` ACE stores **0770** for a `0o700` mkdir, and a child of an already-0700 parent comes back 0770 too, so tightening the parent does not cover it. `chmod(2)` is the only call that _sets_ a mode; a caller that stops there has issued a second request rather than confirmed a result. `EnforceMode` is the chmod **and** the re-stat, on one descriptor, because a chmod-then-stat by name can chmod one object and certify another if the name is swapped in between.
+
+`EnsurePrivateDir` composes that into the sequence a process needs when its private directory lives inside a parent other users can write (a state directory under `/tmp`, an admin-socket directory):
+
+- **`mkdir` 0700, remembering whether _this_ call created the level.** `os.MkdirAll` cannot substitute: it stats the path, _follows_ a symlink, finds a directory and returns nil, so it cannot tell "I created this" from "something was already here" — the distinction every decision below turns on.
+- **Open `O_DIRECTORY|O_NOFOLLOW|O_RDONLY`.** The kernel refuses a planted symlink instead of following it (`ErrSymlinkTarget`), refuses anything that is not a directory (`ErrNotDirectory`), and cannot be stalled indefinitely by a planted FIFO.
+- **`fstat` the handle, then require `os.Geteuid()` to own it** (`ErrNotOwned`). Ownership, not just mode: a perfectly-moded 0700 directory owned by another uid passes every other check and its owner can still replace it — with a symlink the caller then follows — _after_ the verdict returns.
+- **If this call created it, `EnforceMode` to 0700.** That is the ACL repair, and it is safe precisely because we made the directory: no other writer has ever held that name.
+- **If it pre-existed, it is never chmod'ed** and is refused when any group or other bit is set (`ErrModeTooOpen`). Repairing a directory another principal made would take over their name and hand them whatever gets written under it.
+
+**One level per call, deliberately.** `dir`'s parent is not created, inspected, or vouched for; a multi-level path is a loop over the levels, outermost first, because only the caller knows which levels are its own.
+
+> **The verdict is point-in-time.** It proves what was true of one inode while a
+> handle was open on it. It does **not** pin the directory for the caller's later
+> use: the handle is closed before the call returns, so a subsequent `ReadDir`,
+> `Remove`, `Open` or `Mkdir` through the **pathname** re-resolves every component
+> and re-opens the window the check closed. What would close that gap is acting
+> through a retained handle rather than a name — the `openat(2)`-relative
+> operations of an `*os.Root` — which is a different API shape: hold the directory
+> open for its whole lifetime and name only leaves inside it.
+
+Of the functional options only `WithLogger` is consulted, for the one `Warn` a mode repair emits (a filesystem that ignores mode requests is news for every other `mkdir` in the program too). The mode is not a parameter: a "private directory" with a caller-chosen mode is a different primitive.
+
 ### Utilities
 
 - `CleanupStaleTemps(dir, maxAge, opts ...Option) (removed int, err error)`: remove orphaned temp files left by interrupted writes, returning how many were removed. Only files matching the package's exact temp shape (`.atomicfile-<digits>.tmp`) and older than `maxAge` are reclaimed; caller-owned files that merely share the prefix or suffix (`.atomicfile-notes.tmp`, `config.tmp-backup`) are never touched. Each candidate is re-checked immediately before removal, so a same-named fresh temp created during the scan is spared.
@@ -231,6 +267,10 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
 | `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set; or `OpenRegular` refused one |
 | `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named             |
+| `ErrNotDirectory`  | `EnsurePrivateDir`: the name is occupied by a file, FIFO, device node or socket                |
+| `ErrNotOwned`      | `EnsurePrivateDir`: the directory's owner is not the effective uid (or could not be determined)|
+| `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** directory grants group or other access; never repaired  |
+| `ErrModeNotStored` | `EnforceMode`: the mode read back after the chmod is not the mode that was asked for           |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                      |
 
 The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.

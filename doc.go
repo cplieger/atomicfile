@@ -89,6 +89,38 @@
 // ErrSymlinkTarget, the same vocabulary the write side uses. Neither pins the
 // ancestor components — OpenParentInRoot does that.
 //
+// # Private directories and enforced modes
+//
+// A mode passed to mkdir(2) or open(2) is a REQUEST. umask narrows it, and a
+// filesystem carrying an inheritable ACL can widen the result regardless of what
+// was asked — measured on a ZFS nfs4acl dataset, an inheritable group@:rwx ACE
+// stores 0770 for a 0o700 mkdir, and tightening the parent does not cover it.
+// chmod(2) is the only call that SETS a mode, and a caller that stops there has
+// issued a second request rather than confirmed a result.
+//
+// EnforceMode closes that loop on an OPEN HANDLE: fchmod then fstat the same
+// descriptor, returning the mode the filesystem actually stored and refusing a
+// mismatch with ErrModeNotStored. It takes an *os.File, so a file and a directory
+// are the same call, and it observes no pathname — a chmod-then-stat by name can
+// chmod one object and certify another.
+//
+// EnsurePrivateDir is the custody composition around it, for a process
+// establishing a directory only its own user may enter inside a parent others can
+// write: mkdir 0700 recording whether THIS call created it, open
+// O_DIRECTORY|O_NOFOLLOW so a planted symlink is refused rather than followed and
+// a planted FIFO cannot stall the open, fstat the handle, require the effective
+// uid to own it, then EnforceMode a directory it created (the ACL repair, safe
+// because nobody else ever held that name) while REFUSING a pre-existing one that
+// grants group or other access (repairing another principal's directory would take
+// over their name). One level per call: a multi-level path is the caller's loop,
+// because only the caller knows which levels are its own.
+//
+// The verdict is POINT-IN-TIME. It proves what was true of one inode while a
+// handle was open on it; it does not pin the directory for later use, and a caller
+// that goes on to ReadDir or Remove through the PATHNAME re-opens the window the
+// check closed. Acting through a retained handle (an *os.Root) is what would close
+// that, and is a different API shape.
+//
 // # Reload staleness
 //
 // FileIdentity answers "is what I loaded still what is on disk?" from a stat
