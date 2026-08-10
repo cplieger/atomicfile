@@ -100,9 +100,7 @@ func TestWriteFileInRoot(t *testing.T) {
 		}
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		if err := os.WriteFile(filepath.Join(dir, "t"), []byte("old"), 0o640); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
+		writeFileExact(t, filepath.Join(dir, "t"), []byte("old"), 0o640)
 		if _, err := WriteFileInRoot(context.Background(), root, "t",
 			[]byte("new"), WithMode(0o600), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
