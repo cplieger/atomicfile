@@ -16,6 +16,7 @@ type cfg struct {
 	noSync             bool
 	allowSymlinkTarget bool
 	recursive          bool
+	repairOwnedDir     bool
 }
 
 // Option configures an atomic write operation.
@@ -24,6 +25,37 @@ type Option func(*cfg)
 // WithLogger sets a custom logger. If not provided, slog.Default() is used.
 func WithLogger(l *slog.Logger) Option {
 	return func(c *cfg) { c.logger = l }
+}
+
+// WithRepairOwnedDir lets EnsurePrivateDir repair a PRE-EXISTING directory's
+// mode instead of refusing it with ErrModeTooOpen. It affects EnsurePrivateDir
+// only and is ignored by every write entry point.
+//
+// It exists for the caller whose directory is its OWN past output. An app that
+// created <root>/<key>/ at 0700 on a filesystem that stored 0770 will, on the
+// next release, meet its own directory and be refused by the default rule —
+// which is how a mode fix turns into an outage on upgrade, with every item
+// failing at a directory the app itself made.
+//
+// Repairing such a directory is sound, and the reason is ownership rather than
+// trust: mkdir(2) gives a new directory to its creator, a directory cannot be the
+// target of a hard link, and the open is O_NOFOLLOW at the final component — so a
+// directory that fstats as owned by the effective uid was made by this uid, not
+// planted by a neighbour who merely writes the parent. EnsurePrivateDir has
+// already established exactly that before this option is consulted, and every
+// other refusal (ErrNotOwned, ErrNotDirectory, the symlink refusal) still fires
+// first and is unaffected.
+//
+// It is deliberately NOT the default, because a wide mode on a directory you
+// own can be a DELIBERATE choice rather than drift. seadex-scout's report
+// directory is intentionally left wider so an operator can read reports out of
+// it; a library that quietly narrowed it would break that on a version bump.
+// Refusing keeps the default honest — the caller has to say "this directory is
+// mine and its privacy is not negotiable" — and Repaired reports when the
+// option actually changed something, so an app can log the one-time repair
+// rather than discover it later.
+func WithRepairOwnedDir() Option {
+	return func(c *cfg) { c.repairOwnedDir = true }
 }
 
 // WithRecursive makes a stale-temp sweep descend into subdirectories. It affects

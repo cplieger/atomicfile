@@ -24,20 +24,22 @@ const privateDirMode os.FileMode = 0o700
 type PrivateDir struct {
 	// Mode is the mode the filesystem actually stored, as read back from the
 	// open handle: the permission bits plus setuid/setgid/sticky, without the
-	// type bits. On a Created directory this is the post-repair value, so it is
-	// always privateDirMode when the error is nil.
+	// type bits. When the error is nil this is always privateDirMode, except on
+	// the pre-existing-and-already-private path, where it is what was found.
 	Mode os.FileMode
 	// Created reports whether THIS call created the directory. It is the field
 	// the repair decision turns on (see EnsurePrivateDir): a directory this
 	// process just made is one no other writer has ever held a name to, and a
 	// pre-existing one belongs to whoever made it.
 	Created bool
-	// Repaired reports whether the created directory's mode had to be corrected
-	// because mkdir(2) did not store what it was asked for — an inheritable ACL
-	// widening a fresh 0700 directory. It can only be true alongside Created,
-	// and it is worth logging: it says the filesystem under this path does not
-	// honour mode requests, which every other mkdir in the program is also
-	// subject to.
+	// Repaired reports whether the mode had to be corrected because the
+	// filesystem did not store what it was asked for — an inheritable ACL
+	// widening a fresh 0700 directory. On a Created directory that repair is
+	// unconditional; on a pre-existing one it happens only under
+	// WithRepairOwnedDir, so Repaired without Created means the option was set
+	// AND it changed something. Either way it is worth logging: it says the
+	// filesystem under this path does not honour mode requests, which every
+	// other mkdir in the program is also subject to.
 	Repaired bool
 }
 
@@ -220,12 +222,25 @@ func EnsurePrivateDir(dir string, opts ...Option) (PrivateDir, error) {
 	}
 	found := chmodBits(fi.Mode())
 	if !created {
-		if found&0o077 != 0 {
+		if found&0o077 == 0 {
+			return PrivateDir{Mode: found}, nil
+		}
+		// WithRepairOwnedDir: the euid-ownership check above has already proved
+		// this directory is ours, which is what makes narrowing it our call
+		// rather than an intrusion. Without the option this is where a caller
+		// meeting its own past output gets refused.
+		if !c.repairOwnedDir {
 			return PrivateDir{}, fmt.Errorf(
-				"%w: %s: mode %#o grants group or other access, and a pre-existing directory is never repaired",
+				"%w: %s: mode %#o grants group or other access, and a pre-existing directory is never repaired without WithRepairOwnedDir",
 				ErrModeTooOpen, clean, found)
 		}
-		return PrivateDir{Mode: found}, nil
+		stored, repairErr := EnforceMode(f, privateDirMode)
+		if repairErr != nil {
+			return PrivateDir{}, repairErr
+		}
+		c.logger.Warn("atomicfile: pre-existing directory was not private; repaired",
+			"dir", clean, "requested", privateDirMode.String(), "found", found.String())
+		return PrivateDir{Mode: stored, Repaired: true}, nil
 	}
 
 	stored, err := EnforceMode(f, privateDirMode)
