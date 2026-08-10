@@ -444,3 +444,89 @@ func TestEnsurePrivateDirLoopsForAMultiLevelPath(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput pins the option
+// that keeps a mode fix from becoming an outage on upgrade. An app whose earlier
+// release created <root>/<key>/ at 0700 on a filesystem that stored 0770 meets
+// its OWN directory on the next run; the default rule refuses it, which fails
+// every item at a directory the app itself made.
+func TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "legacy")
+	mkdirExact(t, dir, 0o770)
+
+	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir())
+	if err != nil {
+		t.Fatalf("EnsurePrivateDir with WithRepairOwnedDir refused an owned 0770 dir: %v", err)
+	}
+	if pd.Mode != privateDirMode {
+		t.Errorf("Mode = %#o, want %#o", pd.Mode, privateDirMode)
+	}
+	if !pd.Repaired {
+		t.Error("Repaired = false; the option changed the mode, so the caller should be able to log the one-time repair")
+	}
+	if pd.Created {
+		t.Error("Created = true for a pre-existing directory")
+	}
+	if got := permOf(t, dir); got != privateDirMode {
+		t.Errorf("on-disk mode = %#o, want %#o", got, privateDirMode)
+	}
+}
+
+// TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption pins that the
+// default is unchanged, so adding the option cannot silently narrow a directory
+// somebody widened on purpose (seadex-scout's report dir is the live case).
+func TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "shared")
+	mkdirExact(t, dir, 0o750)
+
+	if _, err := EnsurePrivateDir(dir); !errors.Is(err, ErrModeTooOpen) {
+		t.Fatalf("err = %v, want ErrModeTooOpen: the default must still refuse", err)
+	}
+	if got := permOf(t, dir); got != 0o750 {
+		t.Errorf("mode changed to %#o; a refusal must not mutate the directory", got)
+	}
+}
+
+// TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner pins that the
+// option relaxes exactly one refusal. Ownership is what makes repairing sound —
+// mkdir(2) gives a directory to its creator and a directory cannot be hard-link targeted
+// — so the euid check must keep firing first, or the option would let the library
+// chmod a neighbour's directory.
+func TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() != 0 {
+		t.Skip("cannot chown to another uid unprivileged")
+	}
+	dir := filepath.Join(t.TempDir(), "theirs")
+	mkdirExact(t, dir, 0o770)
+	if err := os.Chown(dir, 12345, 12345); err != nil {
+		t.Skipf("chown unavailable: %v", err)
+	}
+
+	if _, err := EnsurePrivateDir(dir, WithRepairOwnedDir()); !errors.Is(err, ErrNotOwned) {
+		t.Fatalf("err = %v, want ErrNotOwned even with WithRepairOwnedDir", err)
+	}
+}
+
+// TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone pins that the
+// option is not a blanket chmod: a pre-existing directory that is already private
+// is adopted untouched and reports no repair, so an app can trust Repaired as a
+// signal that the filesystem drifted rather than as noise on every boot.
+func TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "fine")
+	mkdirExact(t, dir, 0o700)
+
+	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir())
+	if err != nil {
+		t.Fatalf("EnsurePrivateDir: %v", err)
+	}
+	if pd.Repaired {
+		t.Error("Repaired = true for a directory that was already 0700")
+	}
+	if pd.Mode != privateDirMode {
+		t.Errorf("Mode = %#o, want %#o", pd.Mode, privateDirMode)
+	}
+}

@@ -150,7 +150,7 @@ A mode argument to `mkdir(2)` or `open(2)` is a **request**, not a result. `umas
 - **`mkdir` 0700, remembering whether _this_ call created the level.** `os.MkdirAll` cannot substitute: it stats the path, _follows_ a symlink, finds a directory and returns nil, so it cannot tell "I created this" from "something was already here" — the distinction every decision below turns on.
 - **Open `O_DIRECTORY|O_NOFOLLOW|O_RDONLY`.** The kernel refuses a planted symlink instead of following it (`ErrSymlinkTarget`), refuses anything that is not a directory (`ErrNotDirectory`), and cannot be stalled indefinitely by a planted FIFO.
 - **`fstat` the handle, then require `os.Geteuid()` to own it** (`ErrNotOwned`). Ownership, not just mode: a perfectly-moded 0700 directory owned by another uid passes every other check and its owner can still replace it — with a symlink the caller then follows — _after_ the verdict returns.
-- **If this call created it, `EnforceMode` to 0700.** That is the ACL repair, and it is safe precisely because we made the directory: no other writer has ever held that name.
+- **If this call created it, `EnforceMode` to 0700.** That is the ACL repair, and it is safe precisely because we made the directory: no other writer has ever held that name. A **pre-existing** directory is refused instead, unless the caller passes `WithRepairOwnedDir()` — which repairs it, because the euid-ownership check has already proved the directory is the caller's own (see the option table). That option exists so a mode fix does not become an outage the first time an app meets a directory an earlier release of itself created.
 - **If it pre-existed, it is never chmod'ed** and is refused when any group or other bit is set (`ErrModeTooOpen`). Repairing a directory another principal made would take over their name and hand them whatever gets written under it.
 
 **One level per call, deliberately.** `dir`'s parent is not created, inspected, or vouched for; a multi-level path is a loop over the levels, outermost first, because only the caller knows which levels are its own.
@@ -252,6 +252,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                                                   |
 | `WithMode(mode)`           | File permission (default: `0o644`)                                                                                                                                                                                                                        |
 | `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                                                                                                                              |
+| `WithRepairOwnedDir()`     | `EnsurePrivateDir` only: repair a **pre-existing** directory whose owner is already the effective uid, instead of refusing it. For adopting your own past output; ignored by writes.                                                                      |
 | `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed                                                                                                        |
 | `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)                                                                                                             |
 | `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                                                                                                                               |
@@ -269,7 +270,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named             |
 | `ErrNotDirectory`  | `EnsurePrivateDir`: the name is occupied by a file, FIFO, device node or socket                |
 | `ErrNotOwned`      | `EnsurePrivateDir`: the directory's owner is not the effective uid (or could not be determined)|
-| `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** directory grants group or other access; never repaired  |
+| `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** dir grants group/other access, no `WithRepairOwnedDir`  |
 | `ErrModeNotStored` | `EnforceMode`: the mode read back after the chmod is not the mode that was asked for           |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                      |
 
