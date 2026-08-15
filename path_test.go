@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -240,7 +239,7 @@ func TestSymlinkTarget(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
 		}
-		_, err := WriteFile(context.Background(), link, []byte("new"))
+		_, err := WriteFile(t.Context(), link, []byte("new"))
 		if !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("WriteFile(symlink) = %v, want ErrSymlinkTarget", err)
 		}
@@ -262,7 +261,7 @@ func TestSymlinkTarget(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
 		}
-		if _, err := WriteFile(context.Background(), link, []byte("new"), WithAllowSymlinkTarget()); err != nil {
+		if _, err := WriteFile(t.Context(), link, []byte("new"), WithAllowSymlinkTarget()); err != nil {
 			t.Fatalf("WriteFile with AllowSymlinkTarget: %v", err)
 		}
 		got, _ := os.ReadFile(link)
@@ -275,7 +274,7 @@ func TestSymlinkTarget(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "new.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data")); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("data")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -291,7 +290,7 @@ func TestSymlinkTarget(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
 		}
-		if _, err := WriteReader(context.Background(), link, strings.NewReader("new")); !errors.Is(err, ErrSymlinkTarget) {
+		if _, err := WriteReader(t.Context(), link, strings.NewReader("new")); !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("WriteReader(symlink) = %v, want ErrSymlinkTarget", err)
 		}
 	})
@@ -307,7 +306,7 @@ func TestSymlinkTarget(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Skipf("symlink unsupported: %v", err)
 		}
-		if _, err := NewPendingFile(context.Background(), link); !errors.Is(err, ErrSymlinkTarget) {
+		if _, err := NewPendingFile(t.Context(), link); !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("NewPendingFile(symlink) = %v, want ErrSymlinkTarget", err)
 		}
 	})
@@ -329,7 +328,7 @@ func TestWriteFile_SymlinkInParentDir(t *testing.T) {
 	// The target file itself is not a symlink, only an ancestor directory is,
 	// so the write is permitted and lands in the real directory.
 	path := filepath.Join(linkDir, "file.txt")
-	if _, err := WriteFile(context.Background(), path, []byte("through symlink parent")); err != nil {
+	if _, err := WriteFile(t.Context(), path, []byte("through symlink parent")); err != nil {
 		t.Fatalf("WriteFile through symlink parent: %v", err)
 	}
 
@@ -347,22 +346,22 @@ func TestNullByte_AllEntryPoints(t *testing.T) {
 	nullPath := "/tmp/test\x00evil"
 
 	t.Run("WriteFile", func(t *testing.T) {
-		if _, err := WriteFile(context.Background(), nullPath, []byte("x")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteFile(t.Context(), nullPath, []byte("x")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("WriteReader", func(t *testing.T) {
-		if _, err := WriteReader(context.Background(), nullPath, strings.NewReader("x")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteReader(t.Context(), nullPath, strings.NewReader("x")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("NewPendingFile", func(t *testing.T) {
-		if _, err := NewPendingFile(context.Background(), nullPath); !errors.Is(err, ErrUnsafePath) {
+		if _, err := NewPendingFile(t.Context(), nullPath); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
 	t.Run("ReadBounded", func(t *testing.T) {
-		if _, err := ReadBounded(context.Background(), nullPath, 1024); !errors.Is(err, ErrUnsafePath) {
+		if _, err := ReadBounded(t.Context(), nullPath, 1024); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("got %v, want ErrUnsafePath", err)
 		}
 	})
@@ -370,7 +369,7 @@ func TestNullByte_AllEntryPoints(t *testing.T) {
 
 func TestEmptyPath_AllEntryPoints(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	if _, err := WriteFile(ctx, "", []byte("x")); !errors.Is(err, ErrEmptyPath) {
 		t.Errorf("WriteFile empty: %v", err)
 	}

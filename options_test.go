@@ -2,7 +2,6 @@ package atomicfile
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -122,7 +121,7 @@ func TestOptions_OrderLastWins(t *testing.T) {
 // rather than dereferenced (which would panic), at every public entry point.
 func TestOptions_NilElement(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("WriteFile", func(t *testing.T) {
 		t.Parallel()
@@ -172,7 +171,7 @@ func TestOptions_AllNil(t *testing.T) {
 		t.Skip("file mode not meaningful on Windows")
 	}
 	p := filepath.Join(t.TempDir(), "allnil.txt")
-	if _, err := WriteFile(context.Background(), p, []byte("x"), nil, nil, nil, nil); err != nil {
+	if _, err := WriteFile(t.Context(), p, []byte("x"), nil, nil, nil, nil); err != nil {
 		t.Fatalf("WriteFile all nils: %v", err)
 	}
 	fi, _ := os.Stat(p)
@@ -189,7 +188,7 @@ func TestOptions_DefaultMode_WriteFile(t *testing.T) {
 		t.Skip("file mode not meaningful on Windows")
 	}
 	p := filepath.Join(t.TempDir(), "dm.txt")
-	if _, err := WriteFile(context.Background(), p, []byte("x")); err != nil {
+	if _, err := WriteFile(t.Context(), p, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	fi, _ := os.Stat(p)
@@ -205,7 +204,7 @@ func TestOptions_Logger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logged.txt")
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	if _, err := WriteFile(context.Background(), path, []byte("data"), WithLogger(logger)); err != nil {
+	if _, err := WriteFile(t.Context(), path, []byte("data"), WithLogger(logger)); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	assertContent(t, path, "data")
@@ -220,7 +219,7 @@ func TestOptions_AllCombined_WriteFile(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "sub", "combined.txt")
 	l := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
-	res, err := WriteFile(context.Background(), path, []byte("combined"),
+	res, err := WriteFile(t.Context(), path, []byte("combined"),
 		WithLogger(l),
 		WithMode(0o600),
 		WithMkdirMode(0o755),

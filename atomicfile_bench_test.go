@@ -2,7 +2,6 @@ package atomicfile
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"testing"
 )
@@ -14,7 +13,7 @@ func BenchmarkWriteFile(b *testing.B) {
 		b.Run(fmt.Sprintf("size=%d/sync", size), func(b *testing.B) {
 			dir := b.TempDir()
 			path := dir + "/target"
-			ctx := context.Background()
+			ctx := b.Context()
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for range b.N {
@@ -26,7 +25,7 @@ func BenchmarkWriteFile(b *testing.B) {
 		b.Run(fmt.Sprintf("size=%d/nosync", size), func(b *testing.B) {
 			dir := b.TempDir()
 			path := dir + "/target"
-			ctx := context.Background()
+			ctx := b.Context()
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for range b.N {
@@ -45,7 +44,7 @@ func BenchmarkWriteReader(b *testing.B) {
 		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			dir := b.TempDir()
 			path := dir + "/target"
-			ctx := context.Background()
+			ctx := b.Context()
 			b.SetBytes(int64(size))
 			b.ResetTimer()
 			for range b.N {
@@ -61,7 +60,7 @@ func BenchmarkPendingFileCommit(b *testing.B) {
 	data := bytes.Repeat([]byte("z"), 4096)
 	dir := b.TempDir()
 	path := dir + "/target"
-	ctx := context.Background()
+	ctx := b.Context()
 	b.SetBytes(int64(len(data)))
 	b.ResetTimer()
 	for range b.N {

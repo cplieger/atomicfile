@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -148,7 +147,7 @@ func TestFileIdentityDetectsTimestampPreservingReplacement(t *testing.T) {
 	// Publish different content of the SAME SIZE through this package's own
 	// rename barrier, then restore the original timestamp — a backup restore
 	// or an rsync -t of an archived generation.
-	if _, err := WriteFile(context.Background(), path, []byte("bbbbb")); err != nil {
+	if _, err := WriteFile(t.Context(), path, []byte("bbbbb")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {

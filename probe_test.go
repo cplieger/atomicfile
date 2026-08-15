@@ -49,7 +49,7 @@ func TestProbeWritable(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 
-		res, err := ProbeWritable(context.Background(), dir)
+		res, err := ProbeWritable(t.Context(), dir)
 		if err != nil {
 			t.Fatalf("ProbeWritable(%q) = err %v, want nil (a stage failure is never an error)", dir, err)
 		}
@@ -77,7 +77,7 @@ func TestProbeWritable(t *testing.T) {
 		parent := t.TempDir()
 		missing := filepath.Join(parent, "nope")
 
-		res, err := ProbeWritable(context.Background(), missing)
+		res, err := ProbeWritable(t.Context(), missing)
 		if err != nil {
 			t.Fatalf("ProbeWritable(missing) = err %v, want nil", err)
 		}
@@ -100,7 +100,7 @@ func TestProbeWritable(t *testing.T) {
 		t.Parallel()
 		created := filepath.Join(t.TempDir(), "sub", "deeper")
 
-		res, err := ProbeWritable(context.Background(), created, WithMkdirMode(0o750))
+		res, err := ProbeWritable(t.Context(), created, WithMkdirMode(0o750))
 		if err != nil {
 			t.Fatalf("ProbeWritable(missing, WithMkdirMode) = err %v, want nil", err)
 		}
@@ -126,7 +126,7 @@ func TestProbeWritable(t *testing.T) {
 			t.Fatalf("seed blocker: %v", err)
 		}
 
-		res, err := ProbeWritable(context.Background(), filepath.Join(blocker, "under"), WithMkdirMode(0o755))
+		res, err := ProbeWritable(t.Context(), filepath.Join(blocker, "under"), WithMkdirMode(0o755))
 		if err != nil {
 			t.Fatalf("ProbeWritable = err %v, want nil", err)
 		}
@@ -145,7 +145,7 @@ func TestProbeWritable(t *testing.T) {
 			t.Fatalf("seed file: %v", err)
 		}
 
-		res, err := ProbeWritable(context.Background(), file)
+		res, err := ProbeWritable(t.Context(), file)
 		if err != nil {
 			t.Fatalf("ProbeWritable(file) = err %v, want nil", err)
 		}
@@ -162,7 +162,7 @@ func TestProbeWritable(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		res, err := ProbeWritable(context.Background(), dir)
+		res, err := ProbeWritable(t.Context(), dir)
 		if err != nil {
 			t.Fatalf("ProbeWritable(unwritable) = err %v, want nil", err)
 		}
@@ -179,7 +179,7 @@ func TestProbeWritable(t *testing.T) {
 
 	t.Run("empty_dir_is_an_argument_error", func(t *testing.T) {
 		t.Parallel()
-		res, err := ProbeWritable(context.Background(), "")
+		res, err := ProbeWritable(t.Context(), "")
 		if !errors.Is(err, ErrEmptyPath) {
 			t.Errorf("err = %v, want ErrEmptyPath", err)
 		}
@@ -210,7 +210,7 @@ func TestProbeWritableRelativeDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	res, err := ProbeWritable(context.Background(), "./.")
+	res, err := ProbeWritable(t.Context(), "./.")
 	if err != nil {
 		t.Fatalf("ProbeWritable(\"./.\") = err %v, want nil", err)
 	}
@@ -230,7 +230,7 @@ func TestProbeWritableInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 
-		res, err := ProbeWritableInRoot(context.Background(), root, ".")
+		res, err := ProbeWritableInRoot(t.Context(), root, ".")
 		if err != nil {
 			t.Fatalf("ProbeWritableInRoot(root, \".\") = err %v, want nil", err)
 		}
@@ -251,7 +251,7 @@ func TestProbeWritableInRoot(t *testing.T) {
 			t.Fatalf("Mkdir: %v", err)
 		}
 
-		res, err := ProbeWritableInRoot(context.Background(), root, "out")
+		res, err := ProbeWritableInRoot(t.Context(), root, "out")
 		if err != nil {
 			t.Fatalf("ProbeWritableInRoot(root, \"out\") = err %v, want nil", err)
 		}
@@ -268,7 +268,7 @@ func TestProbeWritableInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 
-		res, err := ProbeWritableInRoot(context.Background(), root, "made/here", WithMkdirMode(0o755))
+		res, err := ProbeWritableInRoot(t.Context(), root, "made/here", WithMkdirMode(0o755))
 		if err != nil {
 			t.Fatalf("ProbeWritableInRoot(WithMkdirMode) = err %v, want nil", err)
 		}
@@ -302,7 +302,7 @@ func TestProbeWritableInRoot(t *testing.T) {
 		}
 		for name, tc := range cases {
 			t.Run(name, func(t *testing.T) {
-				res, probeErr := ProbeWritableInRoot(context.Background(), root, "../escaped", tc.opts...)
+				res, probeErr := ProbeWritableInRoot(t.Context(), root, "../escaped", tc.opts...)
 				if probeErr != nil {
 					t.Fatalf("ProbeWritableInRoot(escaping) = err %v, want nil (the root refuses it as a stage failure)", probeErr)
 				}
@@ -332,13 +332,13 @@ func TestProbeWritableInRoot(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		if _, err := ProbeWritableInRoot(context.Background(), nil, "."); !errors.Is(err, ErrUnsafePath) {
+		if _, err := ProbeWritableInRoot(t.Context(), nil, "."); !errors.Is(err, ErrUnsafePath) {
 			t.Errorf("nil root: err = %v, want ErrUnsafePath", err)
 		}
-		if _, err := ProbeWritableInRoot(context.Background(), root, ""); !errors.Is(err, ErrEmptyPath) {
+		if _, err := ProbeWritableInRoot(t.Context(), root, ""); !errors.Is(err, ErrEmptyPath) {
 			t.Errorf("empty name: err = %v, want ErrEmptyPath", err)
 		}
-		if _, err := ProbeWritableInRoot(context.Background(), root, "/abs"); !errors.Is(err, ErrUnsafePath) {
+		if _, err := ProbeWritableInRoot(t.Context(), root, "/abs"); !errors.Is(err, ErrUnsafePath) {
 			t.Errorf("absolute name: err = %v, want ErrUnsafePath", err)
 		}
 		if _, err := ProbeWritableInRoot(ctx, root, "."); !errors.Is(err, context.Canceled) {
@@ -595,7 +595,7 @@ func TestProbeLeakIsReclaimable(t *testing.T) {
 	t.Run("ambient_sweep", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
-		res, err := ProbeWritable(context.Background(), dir)
+		res, err := ProbeWritable(t.Context(), dir)
 		if err != nil || !res.OK() {
 			t.Fatalf("ProbeWritable = %+v, err %v; want a clean probe", res, err)
 		}
@@ -619,13 +619,13 @@ func TestProbeLeakIsReclaimable(t *testing.T) {
 	t.Run("root_confined_sweep", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		res, err := ProbeWritableInRoot(context.Background(), root, ".")
+		res, err := ProbeWritableInRoot(t.Context(), root, ".")
 		if err != nil || !res.OK() {
 			t.Fatalf("ProbeWritableInRoot = %+v, err %v; want a clean probe", res, err)
 		}
 		leaked := seedLeakedProbe(t, dir, res.Name)
 
-		sweep, sweepErr := CleanupStaleTempsInRoot(context.Background(), root, time.Hour)
+		sweep, sweepErr := CleanupStaleTempsInRoot(t.Context(), root, time.Hour)
 		if sweepErr != nil {
 			t.Fatalf("CleanupStaleTempsInRoot: %v", sweepErr)
 		}

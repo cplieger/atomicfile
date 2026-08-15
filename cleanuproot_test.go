@@ -156,7 +156,7 @@ func TestCleanupStaleTempsInRoot_non_positive_maxAge(t *testing.T) {
 
 func TestCleanupStaleTempsInRoot_nil_root(t *testing.T) {
 	t.Parallel()
-	if _, err := atomicfile.CleanupStaleTempsInRoot(context.Background(), nil, time.Hour); err == nil {
+	if _, err := atomicfile.CleanupStaleTempsInRoot(t.Context(), nil, time.Hour); err == nil {
 		t.Error("nil root = nil error, want a rejection")
 	}
 }

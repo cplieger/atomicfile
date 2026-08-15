@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,7 +22,7 @@ func TestWriteFile_RapidRoundTrip(t *testing.T) {
 		counter++
 		path := filepath.Join(dir, fmt.Sprintf("testfile-%d", counter))
 
-		if _, err := WriteFile(context.Background(), path, data, WithMode(mode)); err != nil {
+		if _, err := WriteFile(t.Context(), path, data, WithMode(mode)); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 
