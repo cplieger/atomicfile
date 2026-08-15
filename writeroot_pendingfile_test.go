@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -16,7 +15,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("commit_writes_and_renames_within_root", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		pf, err := NewPendingFileInRoot(context.Background(), root, "out.txt")
+		pf, err := NewPendingFileInRoot(t.Context(), root, "out.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
@@ -24,7 +23,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if _, err := pf.WriteString("pending in root"); err != nil {
 			t.Fatalf("WriteString: %v", err)
 		}
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
@@ -41,7 +40,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("temp_name_matches_janitor_shape", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		pf, err := NewPendingFileInRoot(context.Background(), root, "shaped.txt")
+		pf, err := NewPendingFileInRoot(t.Context(), root, "shaped.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
@@ -61,7 +60,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("cleanup_removes_temp_and_commit_aborts", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		pf, err := NewPendingFileInRoot(context.Background(), root, "aborted.txt")
+		pf, err := NewPendingFileInRoot(t.Context(), root, "aborted.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
@@ -71,7 +70,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if err := pf.Cleanup(); err != nil {
 			t.Fatalf("Cleanup: %v", err)
 		}
-		if res, commitErr := pf.Commit(context.Background()); !errors.Is(commitErr, ErrAborted) || res != (Result{}) {
+		if res, commitErr := pf.Commit(t.Context()); !errors.Is(commitErr, ErrAborted) || res != (Result{}) {
 			t.Fatalf("Commit after Cleanup = (%+v, %v), want (zero, ErrAborted)", res, commitErr)
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, "aborted.txt")); !errors.Is(statErr, fs.ErrNotExist) {
@@ -84,18 +83,18 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 
-		pf, err := NewPendingFileInRoot(context.Background(), root, "first.txt")
+		pf, err := NewPendingFileInRoot(t.Context(), root, "first.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
 		if _, err := pf.WriteString("one"); err != nil {
 			t.Fatalf("WriteString: %v", err)
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 
-		pf2, err := NewPendingFileInRoot(context.Background(), root, "second.txt")
+		pf2, err := NewPendingFileInRoot(t.Context(), root, "second.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot after Commit: %v (caller root must stay open)", err)
 		}
@@ -104,7 +103,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		}
 
 		// Still usable after a Cleanup terminal state too.
-		if _, err := WriteFileInRoot(context.Background(), root, "third.txt", []byte("three")); err != nil {
+		if _, err := WriteFileInRoot(t.Context(), root, "third.txt", []byte("three")); err != nil {
 			t.Fatalf("WriteFileInRoot after pending Cleanup: %v (caller root must stay open)", err)
 		}
 		assertContent(t, filepath.Join(dir, "first.txt"), "one")
@@ -114,7 +113,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("rejects_escaping_name", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := NewPendingFileInRoot(context.Background(), root, "../pwned"); err == nil {
+		if _, err := NewPendingFileInRoot(t.Context(), root, "../pwned"); err == nil {
 			t.Fatal("NewPendingFileInRoot(\"../pwned\") = nil, want confinement error")
 		}
 	})
@@ -122,14 +121,14 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("rejects_absolute_name", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := NewPendingFileInRoot(context.Background(), root, "/etc/passwd"); !errors.Is(err, ErrUnsafePath) {
+		if _, err := NewPendingFileInRoot(t.Context(), root, "/etc/passwd"); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
 
 	t.Run("nil_root_returns_ErrUnsafePath", func(t *testing.T) {
 		t.Parallel()
-		if _, err := NewPendingFileInRoot(context.Background(), nil, "f"); !errors.Is(err, ErrUnsafePath) {
+		if _, err := NewPendingFileInRoot(t.Context(), nil, "f"); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -146,7 +145,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
-		if _, err := NewPendingFileInRoot(context.Background(), root, "link"); !errors.Is(err, ErrSymlinkTarget) {
+		if _, err := NewPendingFileInRoot(t.Context(), root, "link"); !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("err = %v, want ErrSymlinkTarget", err)
 		}
 	})
@@ -154,7 +153,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("mkdir_mode_creates_parents_inside_root", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		pf, err := NewPendingFileInRoot(context.Background(), root, "nested/deep/out.txt", WithMkdirMode(0o755))
+		pf, err := NewPendingFileInRoot(t.Context(), root, "nested/deep/out.txt", WithMkdirMode(0o755))
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
@@ -162,7 +161,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if _, err := pf.WriteString("nested"); err != nil {
 			t.Fatalf("WriteString: %v", err)
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		assertContent(t, filepath.Join(dir, "nested", "deep", "out.txt"), "nested")
@@ -171,7 +170,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 	t.Run("streaming_readfrom_then_verify_then_commit", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		pf, err := NewPendingFileInRoot(context.Background(), root, "streamed.txt")
+		pf, err := NewPendingFileInRoot(t.Context(), root, "streamed.txt")
 		if err != nil {
 			t.Fatalf("NewPendingFileInRoot: %v", err)
 		}
@@ -184,14 +183,14 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if _, err := pf.Seek(0, 0); err != nil {
 			t.Fatalf("Seek: %v", err)
 		}
-		staged, err := ReadBoundedFile(context.Background(), pf.File, 1<<10)
+		staged, err := ReadBoundedFile(t.Context(), pf.File, 1<<10)
 		if err != nil {
 			t.Fatalf("ReadBoundedFile(staged): %v", err)
 		}
 		if string(staged) != "streamed payload" {
 			t.Fatalf("staged content = %q, want %q", staged, "streamed payload")
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		assertContent(t, filepath.Join(dir, "streamed.txt"), "streamed payload")

@@ -17,7 +17,7 @@ func TestWriteFileInRoot(t *testing.T) {
 	t.Run("writes_and_renames_within_root", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		res, err := WriteFileInRoot(context.Background(), root, "out.pfx", []byte("payload"))
+		res, err := WriteFileInRoot(t.Context(), root, "out.pfx", []byte("payload"))
 		if err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
@@ -35,7 +35,7 @@ func TestWriteFileInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 		// "a/../b.txt" cleans to "b.txt"; the write stays in root.
-		if _, err := WriteFileInRoot(context.Background(), root, "a/../b.txt", []byte("hi")); err != nil {
+		if _, err := WriteFileInRoot(t.Context(), root, "a/../b.txt", []byte("hi")); err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
 		assertContent(t, filepath.Join(dir, "b.txt"), "hi")
@@ -45,7 +45,7 @@ func TestWriteFileInRoot(t *testing.T) {
 	t.Run("creates_parent_with_mkdir_mode", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		_, err := WriteFileInRoot(context.Background(), root, "nested/deep/out.pfx",
+		_, err := WriteFileInRoot(t.Context(), root, "nested/deep/out.pfx",
 			[]byte("p"), WithMkdirMode(0o755))
 		if err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
@@ -56,7 +56,7 @@ func TestWriteFileInRoot(t *testing.T) {
 	t.Run("missing_parent_without_mkdir_is_error", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "nope/out.pfx", []byte("p")); err == nil {
+		if _, err := WriteFileInRoot(t.Context(), root, "nope/out.pfx", []byte("p")); err == nil {
 			t.Fatal("WriteFileInRoot into missing dir = nil, want error")
 		}
 		assertNoTempLeak(t, dir)
@@ -68,7 +68,7 @@ func TestWriteFileInRoot(t *testing.T) {
 		}
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "secret",
+		if _, err := WriteFileInRoot(t.Context(), root, "secret",
 			[]byte("s"), WithMode(0o600)); err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
@@ -84,7 +84,7 @@ func TestWriteFileInRoot(t *testing.T) {
 	t.Run("no_sync_is_not_durable", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		res, err := WriteFileInRoot(context.Background(), root, "f", []byte("x"), WithNoSync())
+		res, err := WriteFileInRoot(t.Context(), root, "f", []byte("x"), WithNoSync())
 		if err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestWriteFileInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 		writeFileExact(t, filepath.Join(dir, "t"), []byte("old"), 0o640)
-		if _, err := WriteFileInRoot(context.Background(), root, "t",
+		if _, err := WriteFileInRoot(t.Context(), root, "t",
 			[]byte("new"), WithMode(0o600), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 		// bytes.Reader implements io.WriterTo.
-		if _, err := WriteReaderInRoot(context.Background(), root, "wt", bytes.NewReader([]byte("fast"))); err != nil {
+		if _, err := WriteReaderInRoot(t.Context(), root, "wt", bytes.NewReader([]byte("fast"))); err != nil {
 			t.Fatalf("WriteReaderInRoot: %v", err)
 		}
 		assertContent(t, filepath.Join(dir, "wt"), "fast")
@@ -133,7 +133,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 		root, dir := openTestRoot(t)
 		// plainReader hides io.WriterTo, forcing the io.Copy path.
 		r := plainReader{r: bytes.NewReader([]byte("copied"))}
-		if _, err := WriteReaderInRoot(context.Background(), root, "cp", r); err != nil {
+		if _, err := WriteReaderInRoot(t.Context(), root, "cp", r); err != nil {
 			t.Fatalf("WriteReaderInRoot: %v", err)
 		}
 		assertContent(t, filepath.Join(dir, "cp"), "copied")
@@ -143,7 +143,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 		r := plainReader{r: &errReader{n: 4, err: errors.New("simulated IO error")}}
-		_, err := WriteReaderInRoot(context.Background(), root, "broken", r)
+		_, err := WriteReaderInRoot(t.Context(), root, "broken", r)
 		var we *WriteError
 		if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
 			t.Fatalf("err = %v, want WriteError{PhaseTempWrite}", err)
@@ -157,7 +157,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 	t.Run("writer_to_error_removes_temp", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		_, err := WriteReaderInRoot(context.Background(), root, "broken", &errWriterTo{err: errors.New("WriterTo failure")})
+		_, err := WriteReaderInRoot(t.Context(), root, "broken", &errWriterTo{err: errors.New("WriterTo failure")})
 		var we *WriteError
 		if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
 			t.Fatalf("err = %v, want WriteError{PhaseTempWrite}", err)
@@ -168,7 +168,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 	t.Run("rejects_nil_reader_and_leaves_no_target", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		if _, err := WriteReaderInRoot(context.Background(), root, "nilreader", nil); err == nil {
+		if _, err := WriteReaderInRoot(t.Context(), root, "nilreader", nil); err == nil {
 			t.Fatal("WriteReaderInRoot(nil reader) = nil, want non-nil error")
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, "nilreader")); !errors.Is(statErr, fs.ErrNotExist) {
@@ -182,7 +182,7 @@ func TestWriteReaderInRoot(t *testing.T) {
 		// Both root and reader are nil: the nil-root contract (ErrUnsafePath)
 		// must win over the nil-reader guard, matching writeAtomicInRoot's
 		// documented "A nil root returns ErrUnsafePath" behavior.
-		if _, err := WriteReaderInRoot(context.Background(), nil, "f", nil); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteReaderInRoot(t.Context(), nil, "f", nil); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -197,7 +197,7 @@ func TestWriteInRoot_Confinement(t *testing.T) {
 	t.Run("rejects_parent_traversal_escape", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "../pwned", []byte("x")); err == nil {
+		if _, err := WriteFileInRoot(t.Context(), root, "../pwned", []byte("x")); err == nil {
 			t.Fatal("WriteFileInRoot(\"../pwned\") = nil, want confinement error")
 		}
 	})
@@ -212,7 +212,7 @@ func TestWriteInRoot_Confinement(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(dir, "evil")); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
-		_, err := WriteFileInRoot(context.Background(), root, "evil/pwned",
+		_, err := WriteFileInRoot(t.Context(), root, "evil/pwned",
 			[]byte("x"), WithMkdirMode(0o755))
 		if err == nil {
 			t.Fatal("write through escaping symlink = nil, want confinement error")
@@ -234,7 +234,7 @@ func TestWriteInRoot_Confinement(t *testing.T) {
 		if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
-		_, err := WriteFileInRoot(context.Background(), root, "link", []byte("x"))
+		_, err := WriteFileInRoot(t.Context(), root, "link", []byte("x"))
 		if !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("err = %v, want ErrSymlinkTarget", err)
 		}
@@ -254,7 +254,7 @@ func TestWriteInRoot_Confinement(t *testing.T) {
 		if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
 			t.Fatalf("symlink: %v", err)
 		}
-		if _, err := WriteFileInRoot(context.Background(), root, "link",
+		if _, err := WriteFileInRoot(t.Context(), root, "link",
 			[]byte("replaced"), WithAllowSymlinkTarget()); err != nil {
 			t.Fatalf("WriteFileInRoot: %v", err)
 		}
@@ -269,7 +269,7 @@ func TestWriteInRoot_Validation(t *testing.T) {
 
 	t.Run("nil_root", func(t *testing.T) {
 		t.Parallel()
-		if _, err := WriteFileInRoot(context.Background(), nil, "f", []byte("x")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteFileInRoot(t.Context(), nil, "f", []byte("x")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -277,7 +277,7 @@ func TestWriteInRoot_Validation(t *testing.T) {
 	t.Run("empty_name", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "", []byte("x")); !errors.Is(err, ErrEmptyPath) {
+		if _, err := WriteFileInRoot(t.Context(), root, "", []byte("x")); !errors.Is(err, ErrEmptyPath) {
 			t.Fatalf("err = %v, want ErrEmptyPath", err)
 		}
 	})
@@ -285,7 +285,7 @@ func TestWriteInRoot_Validation(t *testing.T) {
 	t.Run("absolute_name", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "/etc/passwd", []byte("x")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteFileInRoot(t.Context(), root, "/etc/passwd", []byte("x")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -293,7 +293,7 @@ func TestWriteInRoot_Validation(t *testing.T) {
 	t.Run("null_byte_name", func(t *testing.T) {
 		t.Parallel()
 		root, _ := openTestRoot(t)
-		if _, err := WriteFileInRoot(context.Background(), root, "a\x00b", []byte("x")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteFileInRoot(t.Context(), root, "a\x00b", []byte("x")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -319,7 +319,7 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	root, dir := openTestRoot(t)
 	h := &captureHandler{}
-	res, err := WriteFileInRoot(context.Background(), root, "f", []byte("x"), WithLogger(slog.New(h)))
+	res, err := WriteFileInRoot(t.Context(), root, "f", []byte("x"), WithLogger(slog.New(h)))
 	if err != nil {
 		t.Fatalf("WriteFileInRoot = %v; a post-rename fsync failure is not a hard error", err)
 	}
@@ -376,7 +376,7 @@ func TestWriteFileInRoot_PreserveOwnershipSameOwnerSucceeds(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	res, err := WriteFileInRoot(context.Background(), root, "t", []byte("new"), WithPreserveOwnership())
+	res, err := WriteFileInRoot(t.Context(), root, "t", []byte("new"), WithPreserveOwnership())
 	if err != nil {
 		t.Fatalf("WriteFileInRoot(WithPreserveOwnership) = %v, want nil (same-owner chown is a no-op success)", err)
 	}
@@ -396,7 +396,7 @@ func TestWriteFileInRoot_PreserveOwnershipMissingTargetSucceeds(t *testing.T) {
 	}
 	root, dir := openTestRoot(t)
 
-	res, err := WriteFileInRoot(context.Background(), root, "fresh", []byte("data"), WithPreserveOwnership())
+	res, err := WriteFileInRoot(t.Context(), root, "fresh", []byte("data"), WithPreserveOwnership())
 	if err != nil {
 		t.Fatalf("WriteFileInRoot(WithPreserveOwnership) = %v, want nil (a missing target makes ownership preservation a no-op success)", err)
 	}

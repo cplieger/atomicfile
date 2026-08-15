@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -22,7 +21,7 @@ func TestPreserveMode(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "preserve.txt")
 		writeFileExact(t, path, []byte("old"), 0o755)
-		if _, err := WriteFile(context.Background(), path, []byte("new"), WithPreserveMode()); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("new"), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -35,7 +34,7 @@ func TestPreserveMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "new.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data"), WithMode(0o600), WithPreserveMode()); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("data"), WithMode(0o600), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -49,7 +48,7 @@ func TestPreserveMode(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "reader.txt")
 		writeFileExact(t, path, []byte("old"), 0o750)
-		if _, err := WriteReader(context.Background(), path, strings.NewReader("new"), WithPreserveMode()); err != nil {
+		if _, err := WriteReader(t.Context(), path, strings.NewReader("new"), WithPreserveMode()); err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -63,7 +62,7 @@ func TestPreserveMode(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "pf.txt")
 		writeFileExact(t, path, []byte("old"), 0o750)
-		pf, err := NewPendingFile(context.Background(), path, WithMode(0o644), WithPreserveMode())
+		pf, err := NewPendingFile(t.Context(), path, WithMode(0o644), WithPreserveMode())
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -71,7 +70,7 @@ func TestPreserveMode(t *testing.T) {
 		if _, err := pf.Write([]byte("new")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -90,7 +89,7 @@ func TestPreserveMode_OverridesExplicitMode(t *testing.T) {
 	path := filepath.Join(dir, "pm.txt")
 	writeFileExact(t, path, []byte("old"), 0o751)
 	// WithPreserveMode takes priority over an explicit WithMode for an existing target.
-	if _, err := WriteFile(context.Background(), path, []byte("new"),
+	if _, err := WriteFile(t.Context(), path, []byte("new"),
 		WithMode(0o600), WithPreserveMode()); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +106,7 @@ func TestPreserveOwnership(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "noexist.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data"), WithPreserveOwnership()); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("data"), WithPreserveOwnership()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -125,7 +124,7 @@ func TestPreserveOwnership(t *testing.T) {
 		path := filepath.Join(dir, "owned.txt")
 		writeFileExact(t, path, []byte("old"), 0o644)
 		// Chowning to the current owner is a no-op that succeeds for any user.
-		if _, err := WriteFile(context.Background(), path, []byte("new"), WithPreserveOwnership()); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("new"), WithPreserveOwnership()); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -152,7 +151,7 @@ func TestWriteFile_PreserveOwnership_ChownFailure_NonFatal(t *testing.T) {
 	stubRootChown(t, sentinel)
 
 	h := &captureHandler{}
-	res, err := WriteFile(context.Background(), path, []byte("new"),
+	res, err := WriteFile(t.Context(), path, []byte("new"),
 		WithPreserveOwnership(), WithLogger(slog.New(h)))
 	if err != nil {
 		t.Fatalf("WriteFile = %v, want nil (chown failure must be non-fatal)", err)

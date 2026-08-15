@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -64,7 +63,7 @@ func TestWrite_StagingFileIsOwnerOnlyBeforeAnyDataIsWritten(t *testing.T) {
 		return strings.NewReader("").Read(p)
 	})
 
-	if _, err := WriteReader(context.Background(), target, io.MultiReader(strings.NewReader("token=hunter2\n"), probe),
+	if _, err := WriteReader(t.Context(), target, io.MultiReader(strings.NewReader("token=hunter2\n"), probe),
 		WithMode(0o600)); err != nil {
 		t.Fatalf("WriteReader: %v", err)
 	}
@@ -119,7 +118,7 @@ func TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored(t *testing.T) {
 	// And the happy path: an explicit mode is what ends up on disk, read back
 	// rather than assumed.
 	target := filepath.Join(t.TempDir(), "cfg.json")
-	if _, err := WriteFile(context.Background(), target, []byte("{}"), WithMode(0o600)); err != nil {
+	if _, err := WriteFile(t.Context(), target, []byte("{}"), WithMode(0o600)); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	fi, err := os.Lstat(target)

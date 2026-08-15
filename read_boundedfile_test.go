@@ -22,7 +22,7 @@ func TestReadBoundedFile(t *testing.T) {
 			t.Fatalf("open: %v", err)
 		}
 		defer f.Close()
-		got, err := ReadBoundedFile(context.Background(), f, 1024)
+		got, err := ReadBoundedFile(t.Context(), f, 1024)
 		if err != nil {
 			t.Fatalf("ReadBoundedFile: %v", err)
 		}
@@ -42,7 +42,7 @@ func TestReadBoundedFile(t *testing.T) {
 			t.Fatalf("open: %v", err)
 		}
 		defer f.Close()
-		if _, err := ReadBoundedFile(context.Background(), f, 50); !errors.Is(err, ErrFileTooLarge) {
+		if _, err := ReadBoundedFile(t.Context(), f, 50); !errors.Is(err, ErrFileTooLarge) {
 			t.Fatalf("ReadBoundedFile(over) = %v, want ErrFileTooLarge", err)
 		}
 	})
@@ -67,7 +67,7 @@ func TestReadBoundedFile(t *testing.T) {
 
 	t.Run("rejects_nil_file_without_panic", func(t *testing.T) {
 		t.Parallel()
-		got, err := ReadBoundedFile(context.Background(), nil, 1024)
+		got, err := ReadBoundedFile(t.Context(), nil, 1024)
 		if err == nil {
 			t.Fatalf("ReadBoundedFile(nil) = %v, want non-nil error", got)
 		}
@@ -87,7 +87,7 @@ func TestReadBoundedFile(t *testing.T) {
 			t.Fatalf("open: %v", err)
 		}
 		defer f.Close()
-		if _, err := ReadBoundedFile(context.Background(), f, 1024); err != nil {
+		if _, err := ReadBoundedFile(t.Context(), f, 1024); err != nil {
 			t.Fatalf("first read: %v", err)
 		}
 		// The caller owns f; ReadBoundedFile must not close it.
@@ -114,7 +114,7 @@ func TestReadBoundedFile(t *testing.T) {
 			t.Fatalf("root.Open: %v", err)
 		}
 		defer f.Close()
-		got, err := ReadBoundedFile(context.Background(), f, 1024)
+		got, err := ReadBoundedFile(t.Context(), f, 1024)
 		if err != nil {
 			t.Fatalf("ReadBoundedFile via root: %v", err)
 		}

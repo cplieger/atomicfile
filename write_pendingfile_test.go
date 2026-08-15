@@ -19,7 +19,7 @@ func TestPendingFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "pending.txt")
-		pf, err := NewPendingFile(context.Background(), path)
+		pf, err := NewPendingFile(t.Context(), path)
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -27,7 +27,7 @@ func TestPendingFile(t *testing.T) {
 		if _, err := pf.Write([]byte("pending data")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
@@ -47,7 +47,7 @@ func TestPendingFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "cleanup.txt")
-		pf, err := NewPendingFile(context.Background(), path)
+		pf, err := NewPendingFile(t.Context(), path)
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -70,18 +70,18 @@ func TestPendingFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "idem.txt")
-		pf, err := NewPendingFile(context.Background(), path)
+		pf, err := NewPendingFile(t.Context(), path)
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
 		if _, err := pf.Write([]byte("once")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		first, err := pf.Commit(context.Background())
+		first, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("first Commit: %v", err)
 		}
-		second, err := pf.Commit(context.Background())
+		second, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("second Commit: %v", err)
 		}
@@ -101,7 +101,7 @@ func TestPendingFile(t *testing.T) {
 		}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "mode.txt")
-		pf, err := NewPendingFile(context.Background(), path, WithMode(0o600))
+		pf, err := NewPendingFile(t.Context(), path, WithMode(0o600))
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -109,7 +109,7 @@ func TestPendingFile(t *testing.T) {
 		if _, err := pf.Write([]byte("secret")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -120,7 +120,7 @@ func TestPendingFile(t *testing.T) {
 
 	t.Run("invalid_path", func(t *testing.T) {
 		t.Parallel()
-		_, err := NewPendingFile(context.Background(), "relative/path")
+		_, err := NewPendingFile(t.Context(), "relative/path")
 		if !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("NewPendingFile(relative) = %v, want ErrUnsafePath", err)
 		}
@@ -130,7 +130,7 @@ func TestPendingFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "sub", "pending.txt")
-		pf, err := NewPendingFile(context.Background(), path, WithMkdirMode(0o755))
+		pf, err := NewPendingFile(t.Context(), path, WithMkdirMode(0o755))
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -138,7 +138,7 @@ func TestPendingFile(t *testing.T) {
 		if _, err := pf.Write([]byte("nested")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		if _, err := pf.Commit(context.Background()); err != nil {
+		if _, err := pf.Commit(t.Context()); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -151,7 +151,7 @@ func TestPendingFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "nosync.txt")
-		pf, err := NewPendingFile(context.Background(), path, WithNoSync())
+		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
 		if err != nil {
 			t.Fatalf("NewPendingFile: %v", err)
 		}
@@ -159,7 +159,7 @@ func TestPendingFile(t *testing.T) {
 		if _, err := pf.Write([]byte("fast")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
@@ -179,7 +179,7 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			pf, err := NewPendingFile(context.Background(), path, WithNoSync())
+			pf, err := NewPendingFile(t.Context(), path, WithNoSync())
 			if err != nil {
 				return
 			}
@@ -187,7 +187,7 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 			if _, err := pf.Write([]byte(strings.Repeat("Z", idx+1))); err != nil {
 				return
 			}
-			_, _ = pf.Commit(context.Background())
+			_, _ = pf.Commit(t.Context())
 		}(i)
 	}
 	wg.Wait()
@@ -221,7 +221,7 @@ func TestPendingFile_Commit_ContextCancel_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cf.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestPendingFile_CancelMidBarrier_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pf-midbarrier.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile = %v", err)
 	}
@@ -254,7 +254,7 @@ func TestPendingFile_CancelMidBarrier_NoTempLeak(t *testing.T) {
 	if _, err := pf.Write([]byte("data")); err != nil {
 		t.Fatalf("Write = %v", err)
 	}
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 1}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 1}
 	if _, err := pf.Commit(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Commit(cancel-mid-barrier) = %v, want context.Canceled", err)
 	}
@@ -268,7 +268,7 @@ func TestPendingFile_AbandonedLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "abandoned.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestPendingFile_DoubleCleanup(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dblclean.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestPendingFile_CleanupThenCommit_ReturnsAborted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cleancommit.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestPendingFile_CleanupThenCommit_ReturnsAborted(t *testing.T) {
 	}
 	// Commit after Cleanup must report ErrAborted, not a false zero-Result
 	// success: the temp was already removed, so nothing reached the final path.
-	res, commitErr := pf.Commit(context.Background())
+	res, commitErr := pf.Commit(t.Context())
 	if !errors.Is(commitErr, ErrAborted) {
 		t.Fatalf("Commit after Cleanup = %v, want ErrAborted", commitErr)
 	}
@@ -342,14 +342,14 @@ func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "commit-then-clean.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
 	if _, err := pf.Write([]byte("kept")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	first, err := pf.Commit(context.Background())
+	first, err := pf.Commit(t.Context())
 	if err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 		t.Fatalf("Cleanup after Commit should be a no-op: %v", err)
 	}
 	assertContent(t, path, "kept") // Cleanup must not remove the committed file
-	again, err := pf.Commit(context.Background())
+	again, err := pf.Commit(t.Context())
 	if err != nil {
 		t.Fatalf("Commit after a no-op Cleanup: %v", err)
 	}
@@ -377,7 +377,7 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "failed-commit-replay.txt")
 
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 		t.Fatalf("File.Close: %v", err)
 	}
 
-	firstRes, firstErr := pf.Commit(context.Background())
+	firstRes, firstErr := pf.Commit(t.Context())
 	var we *WriteError
 	if !errors.As(firstErr, &we) || we.Phase != PhaseTempChmod {
 		t.Fatalf("first Commit = %v, want *WriteError{PhaseTempChmod}", firstErr)
@@ -397,7 +397,7 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 		t.Fatalf("first Commit result = %+v, want zero Result", firstRes)
 	}
 
-	secondRes, secondErr := pf.Commit(context.Background())
+	secondRes, secondErr := pf.Commit(t.Context())
 	if secondErr != firstErr {
 		t.Errorf("second Commit err = %v, want the cached first err %v (identical value)", secondErr, firstErr)
 	}
@@ -428,7 +428,7 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 		t.Fatalf("seed blocker: %v", err)
 	}
 
-	pf, err := NewPendingFile(context.Background(), target)
+	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -436,13 +436,13 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	_, firstErr := pf.Commit(context.Background())
+	_, firstErr := pf.Commit(t.Context())
 	var we *WriteError
 	if !errors.As(firstErr, &we) || we.Phase != PhaseRename {
 		t.Fatalf("Commit(onto non-empty dir) = %v, want *WriteError{PhaseRename}", firstErr)
 	}
 
-	_, secondErr := pf.Commit(context.Background())
+	_, secondErr := pf.Commit(t.Context())
 	if secondErr != firstErr {
 		t.Errorf("second Commit = %v, want the cached rename error %v (identical value)", secondErr, firstErr)
 	}
@@ -458,7 +458,7 @@ func TestPendingFile_Cleanup_CloseFailure_StillRemovesTemp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cleanup-closed-fd.txt")
 
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -491,7 +491,7 @@ func TestPendingFile_Cleanup_RemoveFailureSurfacesError(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.txt")
 
-	pf, err := NewPendingFile(context.Background(), target)
+	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
 		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
 	}
@@ -516,7 +516,7 @@ func TestPendingFile_Cleanup_SuccessReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ok.txt")
 
-	pf, err := NewPendingFile(context.Background(), target)
+	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
 		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
 	}
@@ -542,7 +542,7 @@ func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "retry.txt")
 
-	pf, err := NewPendingFile(context.Background(), target)
+	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
 		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
 	}
@@ -561,7 +561,7 @@ func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 
 	// A failed Cleanup must NOT falsely mark the write cleaned: Commit still
 	// aborts because nothing reached the final path.
-	if _, commitErr := pf.Commit(context.Background()); !errors.Is(commitErr, ErrAborted) {
+	if _, commitErr := pf.Commit(t.Context()); !errors.Is(commitErr, ErrAborted) {
 		t.Fatalf("Commit after a failed Cleanup = %v, want ErrAborted", commitErr)
 	}
 
@@ -592,7 +592,7 @@ func TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure(t 
 	dir := t.TempDir()
 	target := filepath.Join(dir, "retry-still-blocked.txt")
 
-	pf, err := NewPendingFile(context.Background(), target)
+	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
 		t.Fatalf("NewPendingFile(%q) = %v, want nil", target, err)
 	}
@@ -615,7 +615,7 @@ func TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure(t 
 	if errors.Is(secondErr, fs.ErrNotExist) {
 		t.Fatalf("second Cleanup = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", secondErr)
 	}
-	if _, commitErr := pf.Commit(context.Background()); !errors.Is(commitErr, ErrAborted) {
+	if _, commitErr := pf.Commit(t.Context()); !errors.Is(commitErr, ErrAborted) {
 		t.Fatalf("Commit after repeated failed Cleanup = %v, want ErrAborted", commitErr)
 	}
 

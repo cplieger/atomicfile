@@ -22,7 +22,7 @@ func TestWriteFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "test.txt")
-		res, err := WriteFile(context.Background(), path, []byte("hello world"))
+		res, err := WriteFile(t.Context(), path, []byte("hello world"))
 		if err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -48,7 +48,7 @@ func TestWriteFile(t *testing.T) {
 		if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 			t.Fatalf("seed WriteFile: %v", err)
 		}
-		if _, err := WriteFile(context.Background(), path, []byte("new")); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("new")); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -59,14 +59,14 @@ func TestWriteFile(t *testing.T) {
 
 	t.Run("empty_path_returns_error", func(t *testing.T) {
 		t.Parallel()
-		if _, err := WriteFile(context.Background(), "", []byte("data")); !errors.Is(err, ErrEmptyPath) {
+		if _, err := WriteFile(t.Context(), "", []byte("data")); !errors.Is(err, ErrEmptyPath) {
 			t.Fatalf("WriteFile(empty) = %v, want ErrEmptyPath", err)
 		}
 	})
 
 	t.Run("relative_path_returns_error", func(t *testing.T) {
 		t.Parallel()
-		if _, err := WriteFile(context.Background(), "relative/path.txt", []byte("data")); !errors.Is(err, ErrUnsafePath) {
+		if _, err := WriteFile(t.Context(), "relative/path.txt", []byte("data")); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("WriteFile(relative) = %v, want ErrUnsafePath", err)
 		}
 	})
@@ -75,7 +75,7 @@ func TestWriteFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "empty.txt")
-		if _, err := WriteFile(context.Background(), path, nil); err != nil {
+		if _, err := WriteFile(t.Context(), path, nil); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -91,7 +91,7 @@ func TestWriteFile(t *testing.T) {
 		}
 		dir := t.TempDir()
 		path := filepath.Join(dir, "perms.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("x"), WithMode(0o600)); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("x"), WithMode(0o600)); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -124,7 +124,7 @@ func TestWriteFile(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "x", "y", "file.txt")
-		_, err := WriteFile(context.Background(), path, []byte("data"))
+		_, err := WriteFile(t.Context(), path, []byte("data"))
 		if err == nil {
 			t.Fatal("expected error for missing parent without WithMkdirMode")
 		}
@@ -148,7 +148,7 @@ func TestWriteFile_Durable(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "durable.txt")
-		res, err := WriteFile(context.Background(), path, []byte("x"))
+		res, err := WriteFile(t.Context(), path, []byte("x"))
 		if err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -161,7 +161,7 @@ func TestWriteFile_Durable(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "nodurable.txt")
-		res, err := WriteFile(context.Background(), path, []byte("x"), WithNoSync())
+		res, err := WriteFile(t.Context(), path, []byte("x"), WithNoSync())
 		if err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestWriteFile_ro_dir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	path := filepath.Join(dir, "out.txt")
-	_, err := WriteFile(context.Background(), path, []byte("data"))
+	_, err := WriteFile(t.Context(), path, []byte("data"))
 	if err == nil {
 		t.Fatal("expected error for read-only dir")
 	}
@@ -208,7 +208,7 @@ func TestWriteFile_ZeroPerm(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "noperm.txt")
-	if _, err := WriteFile(context.Background(), path, []byte("secret"), WithMode(0o000)); err != nil {
+	if _, err := WriteFile(t.Context(), path, []byte("secret"), WithMode(0o000)); err != nil {
 		t.Fatalf("WriteFile(0o000): %v", err)
 	}
 	fi, _ := os.Stat(path)
@@ -225,7 +225,7 @@ func TestWriteFile_RenameFailure_ReportsRenamePhase(t *testing.T) {
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
-	_, err := WriteFile(context.Background(), target, []byte("data"))
+	_, err := WriteFile(t.Context(), target, []byte("data"))
 	if err == nil {
 		t.Fatal("WriteFile(dir target) = nil, want error")
 	}
@@ -247,7 +247,7 @@ func TestWriteReader(t *testing.T) {
 		path := filepath.Join(dir, "stream.txt")
 		// A custom reader that is NOT an io.WriterTo exercises the readerCtx path.
 		r := plainReader{r: strings.NewReader("streamed content")}
-		res, err := WriteReader(context.Background(), path, r)
+		res, err := WriteReader(t.Context(), path, r)
 		if err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
@@ -266,7 +266,7 @@ func TestWriteReader(t *testing.T) {
 		path := filepath.Join(dir, "writerto.txt")
 		// bytes.Reader implements io.WriterTo, exercising the writerCtx path.
 		r := bytes.NewReader([]byte("via WriterTo"))
-		if _, err := WriteReader(context.Background(), path, r); err != nil {
+		if _, err := WriteReader(t.Context(), path, r); err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -283,7 +283,7 @@ func TestWriteReader(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "mode.txt")
 		r := strings.NewReader("x")
-		if _, err := WriteReader(context.Background(), path, r, WithMode(0o600)); err != nil {
+		if _, err := WriteReader(t.Context(), path, r, WithMode(0o600)); err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
 		fi, _ := os.Stat(path)
@@ -306,7 +306,7 @@ func TestWriteReader(t *testing.T) {
 
 	t.Run("empty_path_error", func(t *testing.T) {
 		t.Parallel()
-		if _, err := WriteReader(context.Background(), "", strings.NewReader("x")); !errors.Is(err, ErrEmptyPath) {
+		if _, err := WriteReader(t.Context(), "", strings.NewReader("x")); !errors.Is(err, ErrEmptyPath) {
 			t.Fatalf("WriteReader(empty) = %v, want ErrEmptyPath", err)
 		}
 	})
@@ -315,7 +315,7 @@ func TestWriteReader(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "sub", "deep", "file.txt")
-		if _, err := WriteReader(context.Background(), path, strings.NewReader("nested"), WithMkdirMode(0o755)); err != nil {
+		if _, err := WriteReader(t.Context(), path, strings.NewReader("nested"), WithMkdirMode(0o755)); err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -328,7 +328,7 @@ func TestWriteReader(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "nosync.txt")
-		res, err := WriteReader(context.Background(), path, strings.NewReader("fast"), WithNoSync())
+		res, err := WriteReader(t.Context(), path, strings.NewReader("fast"), WithNoSync())
 		if err != nil {
 			t.Fatalf("WriteReader: %v", err)
 		}
@@ -382,7 +382,7 @@ func TestWriteReader_ErroringReader_CleansUpTemp(t *testing.T) {
 	path := filepath.Join(dir, "errreader.txt")
 	// plainReader hides the WriterTo implementation, forcing the io.Copy path.
 	r := plainReader{r: &errReader{n: 100, err: errors.New("simulated IO error")}}
-	_, err := WriteReader(context.Background(), path, r)
+	_, err := WriteReader(t.Context(), path, r)
 	if err == nil {
 		t.Fatal("expected error from erroring reader")
 	}
@@ -404,7 +404,7 @@ func TestWriteReader_WriterTo_Error_CleansUp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "writerto-err.txt")
 	r := &errWriterTo{err: errors.New("WriterTo failure")}
-	_, err := WriteReader(context.Background(), path, r)
+	_, err := WriteReader(t.Context(), path, r)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -418,7 +418,7 @@ func TestWriteReader_EmptyReader(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty-reader.txt")
-	if _, err := WriteReader(context.Background(), path, strings.NewReader("")); err != nil {
+	if _, err := WriteReader(t.Context(), path, strings.NewReader("")); err != nil {
 		t.Fatalf("WriteReader(empty): %v", err)
 	}
 	got, _ := os.ReadFile(path)
@@ -431,7 +431,7 @@ func TestWriteReader_NilReader(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nilreader.txt")
-	if _, err := WriteReader(context.Background(), path, nil); err == nil {
+	if _, err := WriteReader(t.Context(), path, nil); err == nil {
 		t.Fatal("WriteReader(nil reader) = nil, want non-nil error")
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
@@ -447,7 +447,7 @@ func TestMkdirMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "a", "b", "file.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("nested"), WithMkdirMode(0o755)); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("nested"), WithMkdirMode(0o755)); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		got, _ := os.ReadFile(path)
@@ -460,7 +460,7 @@ func TestMkdirMode(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "x", "y", "file.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data")); err == nil {
+		if _, err := WriteFile(t.Context(), path, []byte("data")); err == nil {
 			t.Fatal("expected error without MkdirMode")
 		}
 	})
@@ -477,7 +477,7 @@ func TestMkdirMode_BlockedByFile(t *testing.T) {
 	// A regular file in the parent chain makes MkdirAll fail ENOTDIR; the
 	// write must error and leave no temp.
 	path := filepath.Join(blocker, "sub", "file.txt")
-	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
+	_, err := WriteFile(t.Context(), path, []byte("data"), WithMkdirMode(0o755))
 	if err == nil {
 		t.Fatal("expected error when the parent chain is blocked by a file")
 	}
@@ -505,7 +505,7 @@ func TestWriteFile_MkdirMode_ParentNotWritable_WrapsError(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
 
 	path := filepath.Join(ro, "sub", "file.txt")
-	_, err := WriteFile(context.Background(), path, []byte("data"), WithMkdirMode(0o755))
+	_, err := WriteFile(t.Context(), path, []byte("data"), WithMkdirMode(0o755))
 
 	if err == nil {
 		t.Fatal("expected error creating a parent directory under a non-writable dir")
@@ -533,7 +533,7 @@ func TestWriteFile_ConcurrentSamePath(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _ = WriteFile(context.Background(), path, []byte(strings.Repeat("A", idx+1)))
+			_, _ = WriteFile(t.Context(), path, []byte(strings.Repeat("A", idx+1)))
 		}(i)
 	}
 	wg.Wait()
@@ -557,7 +557,7 @@ func TestWriteReader_ConcurrentSamePath(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _ = WriteReader(context.Background(), p, bytes.NewReader(bytes.Repeat([]byte{byte(idx)}, idx+1)))
+			_, _ = WriteReader(t.Context(), p, bytes.NewReader(bytes.Repeat([]byte{byte(idx)}, idx+1)))
 		}(i)
 	}
 	wg.Wait()
@@ -586,7 +586,7 @@ func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "afterwrite.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 3}
 	_, err := WriteFile(ctx, path, []byte("data"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteFile(cancel-after-write) = %v, want context.Canceled", err)
@@ -604,7 +604,7 @@ func TestWriteFile_CancelAfterSync_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "aftersync.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 4}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 4}
 	_, err := WriteFile(ctx, path, []byte("data"))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteFile(cancel-after-sync) = %v, want context.Canceled", err)
@@ -619,7 +619,7 @@ func TestWriteReader_CancelMidBarrier_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wr-midbarrier.txt")
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 3}
 	_, err := WriteReader(ctx, path, plainReader{r: strings.NewReader("data")})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteReader(cancel-mid-barrier) = %v, want context.Canceled", err)
@@ -641,7 +641,7 @@ func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wt-cancel.txt")
 
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 3}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 3}
 	_, err := WriteReader(ctx, path, strings.NewReader("payload"))
 
 	if !errors.Is(err, context.Canceled) {

@@ -1,7 +1,6 @@
 package atomicfile
 
 import (
-	"context"
 	"log/slog"
 	"os"
 	"os/user"
@@ -110,7 +109,7 @@ func TestCleanupStaleTemps(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		path := filepath.Join(dir, "live.txt")
-		if _, err := WriteFile(context.Background(), path, []byte("data")); err != nil {
+		if _, err := WriteFile(t.Context(), path, []byte("data")); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		// A successful write leaves no temp, so nothing to reclaim.

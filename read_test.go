@@ -22,7 +22,7 @@ func TestReadBounded(t *testing.T) {
 		if err := os.WriteFile(path, []byte("bounded content"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		got, err := ReadBounded(context.Background(), path, 1024)
+		got, err := ReadBounded(t.Context(), path, 1024)
 		if err != nil {
 			t.Fatalf("ReadBounded: %v", err)
 		}
@@ -38,7 +38,7 @@ func TestReadBounded(t *testing.T) {
 		if err := os.WriteFile(path, make([]byte, 100), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		_, err := ReadBounded(context.Background(), path, 50)
+		_, err := ReadBounded(t.Context(), path, 50)
 		if !errors.Is(err, ErrFileTooLarge) {
 			t.Fatalf("ReadBounded(over) = %v, want ErrFileTooLarge", err)
 		}
@@ -46,7 +46,7 @@ func TestReadBounded(t *testing.T) {
 
 	t.Run("returns_error_for_missing_file", func(t *testing.T) {
 		t.Parallel()
-		_, err := ReadBounded(context.Background(), "/nonexistent/path.txt", 1024)
+		_, err := ReadBounded(t.Context(), "/nonexistent/path.txt", 1024)
 		if err == nil {
 			t.Fatal("expected error for missing file")
 		}
@@ -59,7 +59,7 @@ func TestReadBounded(t *testing.T) {
 		if err := os.WriteFile(path, nil, 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		got, err := ReadBounded(context.Background(), path, 1024)
+		got, err := ReadBounded(t.Context(), path, 1024)
 		if err != nil {
 			t.Fatalf("ReadBounded: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestReadBounded(t *testing.T) {
 		if err := os.WriteFile(path, []byte("12345"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		got, err := ReadBounded(context.Background(), path, 5)
+		got, err := ReadBounded(t.Context(), path, 5)
 		if err != nil {
 			t.Fatalf("ReadBounded: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestReadBounded(t *testing.T) {
 		if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		got, err := ReadBounded(context.Background(), path, math.MaxInt64)
+		got, err := ReadBounded(t.Context(), path, math.MaxInt64)
 		if err != nil {
 			t.Fatalf("ReadBounded with MaxInt64: %v", err)
 		}
@@ -116,7 +116,7 @@ func TestReadBounded(t *testing.T) {
 
 	t.Run("empty_path_returns_error", func(t *testing.T) {
 		t.Parallel()
-		if _, err := ReadBounded(context.Background(), "", 1024); !errors.Is(err, ErrEmptyPath) {
+		if _, err := ReadBounded(t.Context(), "", 1024); !errors.Is(err, ErrEmptyPath) {
 			t.Fatalf("ReadBounded(empty) = %v, want ErrEmptyPath", err)
 		}
 	})
@@ -155,7 +155,7 @@ func TestReadBounded_ZeroMax(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := ReadBounded(context.Background(), path, 0); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := ReadBounded(t.Context(), path, 0); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("ReadBounded(0) = %v, want ErrFileTooLarge", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestReadBounded_ZeroMax_EmptyFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	data, err := ReadBounded(context.Background(), path, 0)
+	data, err := ReadBounded(t.Context(), path, 0)
 	if err != nil {
 		t.Fatalf("ReadBounded(empty, 0): %v", err)
 	}
@@ -183,7 +183,7 @@ func TestReadBounded_NegativeMax(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if _, err := ReadBounded(context.Background(), path, -1); err == nil {
+	if _, err := ReadBounded(t.Context(), path, -1); err == nil {
 		t.Fatal("expected error for negative maxBytes")
 	}
 }
@@ -211,7 +211,7 @@ func TestReadBounded_GrowsPastLimitDuringRead(t *testing.T) {
 		defer w.Close()
 		_, _ = w.Write(payload)
 	}()
-	if _, err := ReadBounded(context.Background(), fifo, limit); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := ReadBounded(t.Context(), fifo, limit); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("ReadBounded(fifo overflow) = %v, want ErrFileTooLarge", err)
 	}
 }
@@ -225,7 +225,7 @@ func TestReadBounded_CancelAfterStat(t *testing.T) {
 	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	ctx := &seqCancelCtx{Context: context.Background(), cancelAt: 2}
+	ctx := &seqCancelCtx{Context: t.Context(), cancelAt: 2}
 	if _, err := ReadBounded(ctx, path, 1024); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadBounded(cancel-after-stat) = %v, want context.Canceled", err)
 	}

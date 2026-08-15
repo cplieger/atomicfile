@@ -2,7 +2,6 @@ package atomicfile
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"os"
@@ -59,10 +58,10 @@ func TestWriteFileMaxBytes(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "f.txt")
 			const previous = "previous"
-			if _, err := WriteFile(context.Background(), path, []byte(previous)); err != nil {
+			if _, err := WriteFile(t.Context(), path, []byte(previous)); err != nil {
 				t.Fatalf("seed write: %v", err)
 			}
-			_, err := WriteFile(context.Background(), path, []byte(tc.data), WithMaxBytes(tc.maxBytes))
+			_, err := WriteFile(t.Context(), path, []byte(tc.data), WithMaxBytes(tc.maxBytes))
 			if tc.wantErr {
 				if !errors.Is(err, ErrFileTooLarge) {
 					t.Fatalf("err = %v, want ErrFileTooLarge", err)
@@ -84,14 +83,14 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")
 	const previous = "previous"
-	if _, err := WriteFile(context.Background(), path, []byte(previous)); err != nil {
+	if _, err := WriteFile(t.Context(), path, []byte(previous)); err != nil {
 		t.Fatalf("seed write: %v", err)
 	}
 
 	// iotest-style chunked reader without WriterTo: forces the generic
 	// io.Copy loop through the capping writer.
 	over := io.LimitReader(neverEnding('x'), 100)
-	_, err := WriteReader(context.Background(), path, over, WithMaxBytes(64))
+	_, err := WriteReader(t.Context(), path, over, WithMaxBytes(64))
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("err = %v, want ErrFileTooLarge through the WriteError wrap", err)
 	}
@@ -104,13 +103,13 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 
 	// A WriterTo source exercises the fast path; the cap must hold there too.
 	overWriterTo := bytes.NewReader(bytes.Repeat([]byte("y"), 100))
-	if _, err := WriteReader(context.Background(), path, overWriterTo, WithMaxBytes(64)); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := WriteReader(t.Context(), path, overWriterTo, WithMaxBytes(64)); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("WriterTo path err = %v, want ErrFileTooLarge", err)
 	}
 	requireIntactTarget(t, path, previous)
 
 	// At-cap content passes.
-	if _, err := WriteReader(context.Background(), path, strings.NewReader("abcd"), WithMaxBytes(4)); err != nil {
+	if _, err := WriteReader(t.Context(), path, strings.NewReader("abcd"), WithMaxBytes(4)); err != nil {
 		t.Fatalf("at-cap WriteReader: %v", err)
 	}
 	requireIntactTarget(t, path, "abcd")
@@ -135,13 +134,13 @@ func TestWriteFileInRootMaxBytes(t *testing.T) {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	defer root.Close()
-	if _, err := WriteFileInRoot(context.Background(), root, "f.txt", []byte("abcde"), WithMaxBytes(4)); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := WriteFileInRoot(t.Context(), root, "f.txt", []byte("abcde"), WithMaxBytes(4)); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("err = %v, want ErrFileTooLarge", err)
 	}
 	if _, statErr := root.Stat("f.txt"); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("target exists after rejected write (stat err = %v), want absent", statErr)
 	}
-	if _, err := WriteReaderInRoot(context.Background(), root, "f.txt", strings.NewReader("abcde"), WithMaxBytes(4)); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := WriteReaderInRoot(t.Context(), root, "f.txt", strings.NewReader("abcde"), WithMaxBytes(4)); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("reader err = %v, want ErrFileTooLarge", err)
 	}
 }
@@ -150,7 +149,7 @@ func TestPendingFileMaxBytesRejectsWholeWrite(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.json")
-	pf, err := NewPendingFile(context.Background(), path, WithMaxBytes(8))
+	pf, err := NewPendingFile(t.Context(), path, WithMaxBytes(8))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -190,7 +189,7 @@ func TestPendingFileMaxBytesRejectsWholeWrite(t *testing.T) {
 func TestPendingFileMaxBytesStreamSurface(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	pf, err := NewPendingFile(context.Background(), filepath.Join(dir, "f.txt"), WithMaxBytes(4))
+	pf, err := NewPendingFile(t.Context(), filepath.Join(dir, "f.txt"), WithMaxBytes(4))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -236,7 +235,7 @@ func TestPendingFileMaxBytesEncoderTruncateDance(t *testing.T) {
 	const capBytes = 16
 	payload := `{"k":"0123456"}` // 15 bytes < capBytes
 
-	pf, err := NewPendingFile(context.Background(), path, WithMaxBytes(capBytes+1))
+	pf, err := NewPendingFile(t.Context(), path, WithMaxBytes(capBytes+1))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -250,7 +249,7 @@ func TestPendingFileMaxBytesEncoderTruncateDance(t *testing.T) {
 	if got := pf.BytesWritten(); got != int64(len(payload)) {
 		t.Errorf("BytesWritten after Truncate = %d, want %d (accounting re-synced)", got, len(payload))
 	}
-	if _, err := pf.Commit(context.Background()); err != nil {
+	if _, err := pf.Commit(t.Context()); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -264,7 +263,7 @@ func TestPendingFileMaxBytesEncoderTruncateDance(t *testing.T) {
 
 func TestPendingFileTruncateBeyondCapRejected(t *testing.T) {
 	t.Parallel()
-	pf, err := NewPendingFile(context.Background(), filepath.Join(t.TempDir(), "f.txt"), WithMaxBytes(4))
+	pf, err := NewPendingFile(t.Context(), filepath.Join(t.TempDir(), "f.txt"), WithMaxBytes(4))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -285,7 +284,7 @@ func TestPendingFileTruncateBeyondCapRejected(t *testing.T) {
 // meaningful for every PendingFile, not only capped ones.
 func TestPendingFileUncappedTracksBytes(t *testing.T) {
 	t.Parallel()
-	pf, err := NewPendingFile(context.Background(), filepath.Join(t.TempDir(), "f.txt"))
+	pf, err := NewPendingFile(t.Context(), filepath.Join(t.TempDir(), "f.txt"))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -391,10 +390,10 @@ func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "f.txt")
 			const previous = "previous"
-			if _, err := WriteFile(context.Background(), path, []byte(previous)); err != nil {
+			if _, err := WriteFile(t.Context(), path, []byte(previous)); err != nil {
 				t.Fatalf("seed write: %v", err)
 			}
-			pf, err := NewPendingFile(context.Background(), path, WithMaxBytes(capBytes))
+			pf, err := NewPendingFile(t.Context(), path, WithMaxBytes(capBytes))
 			if err != nil {
 				t.Fatalf("NewPendingFile: %v", err)
 			}
@@ -404,7 +403,7 @@ func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
 				}
 			}()
 			tc.stage(t, pf)
-			_, err = pf.Commit(context.Background())
+			_, err = pf.Commit(t.Context())
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("Commit = %v, want success at cap", err)
@@ -416,7 +415,7 @@ func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
 			if !errors.Is(err, ErrFileTooLarge) {
 				t.Fatalf("Commit = %v, want ErrFileTooLarge", err)
 			}
-			if _, again := pf.Commit(context.Background()); !errors.Is(again, ErrFileTooLarge) {
+			if _, again := pf.Commit(t.Context()); !errors.Is(again, ErrFileTooLarge) {
 				t.Errorf("repeated Commit = %v, want the cached ErrFileTooLarge", again)
 			}
 			requireIntactTarget(t, path, previous)
@@ -436,7 +435,7 @@ func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
 		t.Fatalf("OpenRoot: %v", err)
 	}
 	defer root.Close()
-	pf, err := NewPendingFileInRoot(context.Background(), root, "f.txt", WithMaxBytes(4))
+	pf, err := NewPendingFileInRoot(t.Context(), root, "f.txt", WithMaxBytes(4))
 	if err != nil {
 		t.Fatalf("NewPendingFileInRoot: %v", err)
 	}
@@ -444,7 +443,7 @@ func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
 	if _, err := pf.WriteAt([]byte("0123456789"), 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
-	if _, err := pf.Commit(context.Background()); !errors.Is(err, ErrFileTooLarge) {
+	if _, err := pf.Commit(t.Context()); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("Commit = %v, want ErrFileTooLarge", err)
 	}
 	if _, statErr := root.Stat("f.txt"); !errors.Is(statErr, os.ErrNotExist) {
@@ -459,7 +458,7 @@ func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
 func TestPendingFileUncappedCommitIgnoresStagedSize(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "f.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
@@ -467,7 +466,7 @@ func TestPendingFileUncappedCommitIgnoresStagedSize(t *testing.T) {
 	if _, err := pf.WriteAt(bytes.Repeat([]byte("x"), 1<<10), 0); err != nil {
 		t.Fatalf("WriteAt: %v", err)
 	}
-	if _, err := pf.Commit(context.Background()); err != nil {
+	if _, err := pf.Commit(t.Context()); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}
 	fi, err := os.Stat(path)

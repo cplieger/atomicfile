@@ -2,7 +2,6 @@ package atomicfile
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -22,7 +21,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		res, err := WriteFile(context.Background(), path, []byte("payload"), WithMode(0o644))
+		res, err := WriteFile(t.Context(), path, []byte("payload"), WithMode(0o644))
 		if err != nil {
 			t.Fatalf("WriteFile(dir-fsync fail) = %v, want nil error", err)
 		}
@@ -36,7 +35,7 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		res, err := WriteReader(context.Background(), path, strings.NewReader("payload"))
+		res, err := WriteReader(t.Context(), path, strings.NewReader("payload"))
 		if err != nil {
 			t.Fatalf("WriteReader(dir-fsync fail) = %v, want nil error", err)
 		}
@@ -50,14 +49,14 @@ func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		pf, err := NewPendingFile(context.Background(), path)
+		pf, err := NewPendingFile(t.Context(), path)
 		if err != nil {
 			t.Fatalf("NewPendingFile() = %v", err)
 		}
 		if _, err := pf.WriteString("payload"); err != nil {
 			t.Fatalf("WriteString() = %v", err)
 		}
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("Commit(dir-fsync fail) = %v, want nil error", err)
 		}
@@ -76,7 +75,7 @@ func TestDirSyncFailure_LogsWarn(t *testing.T) {
 	path := filepath.Join(dir, "f.txt")
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	res, err := WriteFile(context.Background(), path, []byte("payload"), WithLogger(logger))
+	res, err := WriteFile(t.Context(), path, []byte("payload"), WithLogger(logger))
 	if err != nil {
 		t.Fatalf("WriteFile = %v, want nil", err)
 	}
@@ -97,7 +96,7 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		res, err := WriteFile(context.Background(), path, []byte("payload"), WithNoSync())
+		res, err := WriteFile(t.Context(), path, []byte("payload"), WithNoSync())
 		if err != nil {
 			t.Fatalf("WriteFile(WithNoSync) = %v, want nil", err)
 		}
@@ -111,7 +110,7 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		res, err := WriteReader(context.Background(), path, strings.NewReader("payload"), WithNoSync())
+		res, err := WriteReader(t.Context(), path, strings.NewReader("payload"), WithNoSync())
 		if err != nil {
 			t.Fatalf("WriteReader(WithNoSync) = %v, want nil", err)
 		}
@@ -125,14 +124,14 @@ func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
 		stubFsyncRootDir(t, sentinel)
 		dir := t.TempDir()
 		path := filepath.Join(dir, "f.txt")
-		pf, err := NewPendingFile(context.Background(), path, WithNoSync())
+		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
 		if err != nil {
 			t.Fatalf("NewPendingFile() = %v", err)
 		}
 		if _, err := pf.WriteString("payload"); err != nil {
 			t.Fatalf("WriteString() = %v", err)
 		}
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			t.Fatalf("Commit(WithNoSync) = %v, want nil", err)
 		}
@@ -174,21 +173,21 @@ func TestPendingFile_Commit_IdempotentAfterDirSyncFailure(t *testing.T) {
 	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "retry.txt")
-	pf, err := NewPendingFile(context.Background(), path)
+	pf, err := NewPendingFile(t.Context(), path)
 	if err != nil {
 		t.Fatalf("NewPendingFile() = %v", err)
 	}
 	if _, err := pf.WriteString("payload"); err != nil {
 		t.Fatalf("WriteString() = %v", err)
 	}
-	first, firstErr := pf.Commit(context.Background())
+	first, firstErr := pf.Commit(t.Context())
 	if firstErr != nil {
 		t.Fatalf("first Commit() = %v, want nil", firstErr)
 	}
 	if first.Durable {
 		t.Errorf("first Result.Durable = true, want false")
 	}
-	second, secondErr := pf.Commit(context.Background())
+	second, secondErr := pf.Commit(t.Context())
 	if secondErr != nil {
 		t.Fatalf("second Commit() = %v, want nil", secondErr)
 	}

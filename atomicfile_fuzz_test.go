@@ -2,7 +2,6 @@ package atomicfile
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,7 +18,7 @@ func FuzzWriteFile(f *testing.F) {
 	f.Add([]byte("big"), "sub/dir/file.json")
 
 	baseDir := f.TempDir()
-	ctx := context.Background()
+	ctx := f.Context()
 
 	f.Fuzz(func(t *testing.T, content []byte, name string) {
 		if len(name) == 0 || len(name) > 255 {
@@ -62,7 +61,7 @@ func FuzzReadBounded(f *testing.F) {
 	f.Add([]byte{}, int64(1))
 	f.Add([]byte("\x00\xff"), int64(1))
 
-	ctx := context.Background()
+	ctx := f.Context()
 
 	f.Fuzz(func(t *testing.T, content []byte, maxBytes int64) {
 		if maxBytes < 0 {
@@ -155,7 +154,7 @@ func FuzzWriteReader(f *testing.F) {
 	f.Add([]byte("\x00\xff\xfe\xfd"))
 
 	baseDir := f.TempDir()
-	ctx := context.Background()
+	ctx := f.Context()
 
 	f.Fuzz(func(t *testing.T, content []byte) {
 		path := filepath.Join(baseDir, "fuzz_writer.dat")
@@ -306,7 +305,7 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 			path = name // exercise validation
 		}
 
-		pf, err := NewPendingFile(context.Background(), path, WithNoSync())
+		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
 		if err != nil {
 			return
 		}
@@ -316,7 +315,7 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 			return
 		}
 
-		res, err := pf.Commit(context.Background())
+		res, err := pf.Commit(t.Context())
 		if err != nil {
 			return
 		}
@@ -426,7 +425,7 @@ func FuzzWriteFileInRoot(f *testing.F) {
 		}
 		defer root.Close()
 
-		res, err := WriteFileInRoot(context.Background(), root, name, content, WithMkdirMode(0o755))
+		res, err := WriteFileInRoot(t.Context(), root, name, content, WithMkdirMode(0o755))
 		if err != nil {
 			return
 		}
@@ -472,7 +471,7 @@ func FuzzProbeWritable(f *testing.F) {
 	f.Add("\x80\x80", true)
 
 	baseDir := f.TempDir()
-	ctx := context.Background()
+	ctx := f.Context()
 
 	f.Fuzz(func(t *testing.T, name string, mkdir bool) {
 		if len(name) == 0 || len(name) > 200 || strings.ContainsRune(name, 0) {
