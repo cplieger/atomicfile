@@ -156,23 +156,6 @@ func TestWriteFile_Durable(t *testing.T) {
 			t.Errorf("Result.Durable = false, want true")
 		}
 	})
-
-	t.Run("nosync_write_is_not_durable", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "nodurable.txt")
-		res, err := WriteFile(t.Context(), path, []byte("x"), WithNoSync())
-		if err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
-		}
-		got, _ := os.ReadFile(path)
-		if string(got) != "x" {
-			t.Errorf("got %q, want %q", got, "x")
-		}
-	})
 }
 
 func TestWriteFile_ro_dir(t *testing.T) {
@@ -321,19 +304,6 @@ func TestWriteReader(t *testing.T) {
 		got, _ := os.ReadFile(path)
 		if string(got) != "nested" {
 			t.Errorf("got %q", got)
-		}
-	})
-
-	t.Run("nosync_is_not_durable", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "nosync.txt")
-		res, err := WriteReader(t.Context(), path, strings.NewReader("fast"), WithNoSync())
-		if err != nil {
-			t.Fatalf("WriteReader: %v", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
 		}
 	})
 }

@@ -41,7 +41,6 @@ const (
 	ProbeStageWrite
 	// ProbeStageSync indicates flushing the probe file failed, the delayed
 	// error a network filesystem reports at fsync rather than at write.
-	// Skipped under WithNoSync.
 	ProbeStageSync
 	// ProbeStageClose indicates closing the probe file failed, the other
 	// place a deferred write error surfaces.
@@ -111,9 +110,6 @@ func (r ProbeResult) OK() bool { return r.Stage == ProbeStageNone }
 // failed. It is the split a caller needs to warn about a leftover while still
 // treating the directory as usable, without hard-coding the stage order at the
 // call site.
-//
-// Under WithNoSync the bytes were written but not flushed, so this reports what
-// the caller asked to be checked, no more.
 func (r ProbeResult) Writable() bool {
 	return r.OK() || r.Stage >= ProbeStageClose
 }
@@ -143,7 +139,7 @@ func (r ProbeResult) Writable() bool {
 // rather than by a naming convention the caller has to reproduce.
 //
 // A missing dir fails at ProbeStageCreate; pass WithMkdirMode to create it
-// first and get ProbeStageMkdir instead. WithNoSync skips the flush stage.
+// first and get ProbeStageMkdir instead.
 // dir may be relative, matching CleanupStaleTemps' dir argument rather than the
 // write functions' absolute-path contract.
 //
@@ -236,7 +232,7 @@ func probeInRoot(root *os.Root, dir string, c *cfg) ProbeResult {
 		Name:   filepath.Base(tmpName),
 		Leaked: true,
 	}
-	if stage, sErr := probeData(f, c); sErr != nil {
+	if stage, sErr := probeData(f); sErr != nil {
 		res.Stage, res.Err = stage, sErr
 	}
 	res.tearDown(root, f, tmpName, c)
@@ -244,15 +240,12 @@ func probeInRoot(root *os.Root, dir string, c *cfg) ProbeResult {
 }
 
 // probeData runs the stages that need the probe file open: the first data write
-// and, unless WithNoSync was set, the flush that makes a deferred filesystem
+// and the flush that makes a deferred filesystem
 // error surface. One byte is enough — it forces an allocation, which is what
 // separates a directory that accepts an entry from one that accepts data.
-func probeData(f *os.File, c *cfg) (ProbeStage, error) {
+func probeData(f *os.File) (ProbeStage, error) {
 	if _, err := f.Write([]byte{0}); err != nil {
 		return ProbeStageWrite, err
-	}
-	if c.noSync {
-		return ProbeStageNone, nil
 	}
 	if err := f.Sync(); err != nil {
 		return ProbeStageSync, err

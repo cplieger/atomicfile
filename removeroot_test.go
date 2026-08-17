@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 // pinRoot makes a temp dir, opens it as an *os.Root, and registers the close.

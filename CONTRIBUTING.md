@@ -20,8 +20,7 @@ ordering is the load-bearing invariant of the package:
 
 After a crash the final path holds either the complete old content or the
 complete new content, never a partial write. Step 6 is what makes the
-rename itself survive power loss; skipping it (via `WithNoSync()`) keeps
-atomicity but drops durability.
+rename itself survive power loss.
 
 When you touch any write path (`WriteFile`, `WriteReader`,
 `NewPendingFile` / `Commit`, `WriteFileInRoot` / `WriteReaderInRoot`),
@@ -36,11 +35,9 @@ preserve this ordering. In particular:
   exception: once the rename succeeds the data is present, so a failed dir
   fsync is **not** a `*WriteError`; it returns a nil error with
   `Result.Durable == false` and a `Warn` log. The "written, but durability
-  not guaranteed" state is now a `Result` flag, not a phase. Likewise a
-  preserve-ownership chown failure is best-effort: it logs at `Warn` and lets
-  the write proceed, so it carries no phase and is not a `*WriteError`.
+  not guaranteed" state is now a `Result` flag, not a phase.
 - On any error before the rename, the temp file must be cleaned up
-  (`removeTemp`). Don't leave orphans.
+  (`removeTempInRoot`). Don't leave orphans.
 - Paths are validated before any filesystem work: `validateAbsClean`
   (non-empty, null-byte-free, cleaned to an absolute path) for the
   package-level writers, and `validateRootName` (relative, no null
@@ -53,25 +50,18 @@ atomic on Windows. Don't add Windows-specific rename code; see the
 "Unsupported by Design" table in `README.md` for the full list of
 deliberate non-features.
 
-## The `fsyncDir`, `fsyncRootDir`, and `osChown` test seams
+## The `fsyncRootDir` test seam
 
 The parent-directory fsync (step 6) is impossible to fail on a healthy
-filesystem, so `fsyncDir` is a package-level `var` that tests reassign to
-inject an `EIO`-style failure (see `dirsync_test.go`'s `stubFsyncDir`). Its
-`*os.Root`-confined analogue is `fsyncRootDir` (the dir-fsync used by
-`WriteFileInRoot` / `WriteReaderInRoot`), stubbed the same way via
-`stubFsyncRootDir` in `helpers_test.go` and exercised by `writeroot_test.go`.
+filesystem, so `fsyncRootDir` (the dir-fsync every write entry point commits
+through, absolute-path adapters included) is a package-level `var` that tests
+reassign to inject an `EIO`-style failure, via `stubFsyncRootDir` in
+`helpers_test.go` (exercised by `dirsync_test.go` and `writeroot_test.go`).
 
-A best-effort `osChown` (used by `WithPreserveOwnership`) is impractical to
-fail from a same-owner test, so it is likewise a package-level `var` that
-tests reassign to inject a chown failure (see `stubOsChown` in
-`helpers_test.go`).
+The seam follows these rules:
 
-These seams follow the same rules:
-
-- Production code must never reassign `fsyncDir`, `fsyncRootDir`, or
-  `osChown`.
-- Tests that stub any of them mutate package state, so they must **not**
+- Production code must never reassign `fsyncRootDir`.
+- Tests that stub it mutate package state, so they must **not**
   call `t.Parallel()` and must restore the original via `t.Cleanup`.
 
 ## Local development
@@ -135,11 +125,11 @@ Tests live beside the code (standard Go layout) but split by intent; match
 the right file when adding cases:
 
 - `write_test.go`, `read_test.go`, `read_boundedfile_test.go`, `path_test.go`,
-  `write_pendingfile_test.go`, `write_preserve_test.go`, `cleanup_test.go`,
+  `write_pendingfile_test.go`, `cleanup_test.go`,
   `errors_test.go`: per-concern table-driven unit tests (write paths, bounded
   reads via `ReadBounded` and the `*os.Root`-confined `ReadBoundedFile` seam,
   path validation,
-  `NewPendingFile` / `Commit`, mode/ownership preservation, temp-cleanup, and
+  `NewPendingFile` / `Commit`, temp-cleanup, and
   `*WriteError` / `WritePhase` tagging), plus failure-injection and edge-case
   hardening (erroring readers, temp-cleanup races, symlink refusal).
 - `options_test.go`: guards for variadic `Option` handling, including `nil`
@@ -149,16 +139,16 @@ the right file when adding cases:
   one external dependency, test-only).
 - `atomicfile_fuzz_test.go`: fuzz targets (see above).
 - `dirsync_test.go`: parent-dir fsync durability (`Result.Durable`
-  propagation) through every durable entry point via the `fsyncDir` seam.
+  propagation) through every durable entry point via the `fsyncRootDir` seam.
 - `writeroot_test.go`: the `*os.Root`-confined writers (`WriteFileInRoot` /
-  `WriteReaderInRoot`): confinement (symlink / `..` escape refusal),
-  preserve-mode/ownership, and dir-fsync durability via the `fsyncRootDir`
+  `WriteReaderInRoot`): confinement (symlink / `..` escape refusal)
+  and dir-fsync durability via the `fsyncRootDir`
   seam.
 - `read_boundedfile_test.go`: `ReadBoundedFile` on an already-open handle,
   including the read-through-an-`*os.Root` seam and the caller-owns-the-handle
   contract.
 - `helpers_test.go`: shared test helpers (`isWindows`, `assertNoTempLeak`,
-  `stubFsyncDir`, `stubOsChown`, `plainReader`, capture-handler logging,
+  `stubFsyncRootDir`, `plainReader`, capture-handler logging,
   `seqCancelCtx`, ...).
 - `example_test.go`: runnable `Example` functions and the README snippet,
   kept compiling.

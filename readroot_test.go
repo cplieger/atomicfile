@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 func TestReadBoundedInRoot(t *testing.T) {

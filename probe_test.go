@@ -358,7 +358,6 @@ func TestProbeData(t *testing.T) {
 
 	cases := map[string]struct {
 		open      func(t *testing.T) *os.File
-		opts      []Option
 		wantStage ProbeStage
 	}{
 		"regular_file_passes": {
@@ -379,16 +378,11 @@ func TestProbeData(t *testing.T) {
 			open:      openUnflushable,
 			wantStage: ProbeStageSync,
 		},
-		"unflushable_handle_passes_under_no_sync": {
-			open:      openUnflushable,
-			opts:      []Option{WithNoSync()},
-			wantStage: ProbeStageNone,
-		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			stage, err := probeData(tc.open(t), buildCfg(tc.opts))
+			stage, err := probeData(tc.open(t))
 			if stage != tc.wantStage {
 				t.Errorf("stage = %v, want %v (err %v)", stage, tc.wantStage, err)
 			}

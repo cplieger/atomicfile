@@ -305,7 +305,7 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 			path = name // exercise validation
 		}
 
-		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
+		pf, err := NewPendingFile(t.Context(), path)
 		if err != nil {
 			return
 		}

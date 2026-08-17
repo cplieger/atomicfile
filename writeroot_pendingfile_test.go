@@ -133,7 +133,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		}
 	})
 
-	t.Run("refuses_symlink_target_by_default", func(t *testing.T) {
+	t.Run("refuses_symlink_target", func(t *testing.T) {
 		if isWindows() {
 			t.Skip("symlink semantics differ on Windows")
 		}

@@ -10,7 +10,7 @@ func BenchmarkWriteFile(b *testing.B) {
 	sizes := []int{64, 4096, 64 * 1024, 1024 * 1024}
 	for _, size := range sizes {
 		data := bytes.Repeat([]byte("x"), size)
-		b.Run(fmt.Sprintf("size=%d/sync", size), func(b *testing.B) {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
 			dir := b.TempDir()
 			path := dir + "/target"
 			ctx := b.Context()
@@ -18,18 +18,6 @@ func BenchmarkWriteFile(b *testing.B) {
 			b.ResetTimer()
 			for range b.N {
 				if _, err := WriteFile(ctx, path, data); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-		b.Run(fmt.Sprintf("size=%d/nosync", size), func(b *testing.B) {
-			dir := b.TempDir()
-			path := dir + "/target"
-			ctx := b.Context()
-			b.SetBytes(int64(size))
-			b.ResetTimer()
-			for range b.N {
-				if _, err := WriteFile(ctx, path, data, WithNoSync()); err != nil {
 					b.Fatal(err)
 				}
 			}

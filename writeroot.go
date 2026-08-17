@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // validateRootName checks that name is a non-empty, relative, null-byte-free
@@ -95,23 +94,12 @@ func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
 	}
 }
 
-// checkSymlinkInRoot refuses a symlink target by default, unless
-// WithAllowSymlinkTarget was set. A missing target is fine. Because the
-// eventual rename replaces the final name rather than following it, the worst
-// case under a racing attacker who plants a symlink is replacing that link —
-// and an *os.Root forbids the link from pointing outside the tree regardless.
-//
-// WithPreserveMode and WithPreserveOwnership read the target via a
-// symlink-following root.Stat (resolveModeInRoot / applyOwnershipInRoot), so
-// within this window a symlink planted inside the root can influence the
-// result file's mode or owner -- never its content, location, or anything
-// outside the root (root.Stat refuses absolute and root-escaping link
-// targets). Keep the directory non-attacker-writable to close the window
-// entirely.
-func checkSymlinkInRoot(root *os.Root, name string, c *cfg) error {
-	if c.allowSymlinkTarget {
-		return nil
-	}
+// checkSymlinkInRoot refuses a symlink target. A missing target is fine. The
+// eventual rename would replace the final name rather than follow it, so the
+// worst case under a racing attacker who plants a symlink is replacing that
+// link — and an *os.Root forbids the link from pointing outside the tree
+// regardless.
+func checkSymlinkInRoot(root *os.Root, name string) error {
 	fi, err := root.Lstat(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -123,58 +111,6 @@ func checkSymlinkInRoot(root *os.Root, name string, c *cfg) error {
 		return fmt.Errorf("%w: %s", ErrSymlinkTarget, name)
 	}
 	return nil
-}
-
-// resolveModeInRoot determines the mode to apply: honor WithPreserveMode by
-// reusing the target's current permission, falling back to the configured mode
-// when the target is absent or cannot be stat-ed.
-func resolveModeInRoot(root *os.Root, name string, c *cfg) os.FileMode {
-	if c.preserveMode {
-		fi, err := root.Stat(name)
-		if err == nil {
-			return fi.Mode().Perm()
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Warn("atomicfile: preserve-mode stat failed; using explicit mode",
-				"target", name, "error", err)
-		}
-	}
-	return c.mode
-}
-
-// rootChown changes the ownership of a name inside root. It is a package var
-// so tests can inject a chown failure; a real EPERM is impractical to force
-// from a same-owner test (and root cannot fail it at all). Production never
-// reassigns it.
-var rootChown = func(root *os.Root, name string, uid, gid int) error {
-	return root.Chown(name, uid, gid)
-}
-
-// applyOwnershipInRoot preserves the target's ownership on the staged temp:
-// when WithPreserveOwnership is set, chown the temp to the target's uid/gid.
-// No-op when the target is absent or its FileInfo.Sys() is not a
-// *syscall.Stat_t. Best-effort: a failed chown is logged at Warn and the write
-// proceeds with the writer's ownership; it never aborts the write.
-func applyOwnershipInRoot(root *os.Root, tmpName, target string, c *cfg) {
-	if !c.preserveOwnership {
-		return
-	}
-	fi, err := root.Stat(target)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			c.logger.Warn("atomicfile: preserve-ownership stat failed; keeping writer ownership",
-				"target", target, "error", err)
-		}
-		return
-	}
-	stat, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return
-	}
-	if err := rootChown(root, tmpName, int(stat.Uid), int(stat.Gid)); err != nil {
-		c.logger.Warn("atomicfile: preserve-ownership chown failed; keeping writer ownership",
-			"target", target, "uid", stat.Uid, "gid", stat.Gid, "error", err)
-	}
 }
 
 // fsyncRootDir fsyncs a directory inside root so a prior rename survives a
@@ -198,22 +134,18 @@ func removeTempInRoot(root *os.Root, tmpName string, logger *slog.Logger) {
 	}
 }
 
-// commitTempInRoot finalizes a synced, closed temp file inside root: apply
-// ownership, atomically rename it to name, then fsync the parent directory. It
-// is the single commit-side barrier — every write entry point (absolute-path
+// commitTempInRoot finalizes a synced, closed temp file inside root:
+// atomically rename it to name, then fsync the parent directory. It is the
+// single commit-side barrier — every write entry point (absolute-path
 // adapters included) commits through it, so a barrier change lands here and
 // nowhere else. A pre-rename failure removes the temp and returns an error
 // (the data did not land). Once the rename succeeds the data is at name; a
 // subsequent parent-dir fsync failure is logged at Warn and reported as
 // durable=false with a nil error, never a hard failure.
 func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable bool, err error) {
-	applyOwnershipInRoot(root, tmpName, name, c)
 	if rnErr := root.Rename(tmpName, name); rnErr != nil {
 		removeTempInRoot(root, tmpName, c.logger)
 		return false, &WriteError{Phase: PhaseRename, Err: rnErr}
-	}
-	if c.noSync {
-		return false, nil
 	}
 	if syncErr := fsyncRootDir(root, dir); syncErr != nil {
 		c.logger.Warn("atomicfile: parent-directory fsync failed; write is not durable",
@@ -242,7 +174,7 @@ func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (t
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, "", "", "", fmt.Errorf("atomicfile: %w", ctxErr)
 	}
-	if symErr := checkSymlinkInRoot(root, cleanName, c); symErr != nil {
+	if symErr := checkSymlinkInRoot(root, cleanName); symErr != nil {
 		return nil, "", "", "", symErr
 	}
 	dir = filepath.Dir(cleanName)
@@ -278,12 +210,11 @@ func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, 
 			removeTempInRoot(root, tmpName, c.logger)
 		}
 	}()
-	mode := resolveModeInRoot(root, cleanName, c)
 	if wErr := writeData(tmp); wErr != nil {
 		tmp.Close()
 		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}
 	}
-	if fErr := finalizeTempFile(ctx, tmp, mode, c); fErr != nil {
+	if fErr := finalizeTempFile(ctx, tmp, c); fErr != nil {
 		return Result{}, fErr
 	}
 	committed = true
