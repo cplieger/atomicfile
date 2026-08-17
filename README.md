@@ -1,6 +1,6 @@
 # atomicfile
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v2.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v3.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v3)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/coverage.json)](https://github.com/cplieger/atomicfile/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
@@ -19,7 +19,7 @@ Every write is `os.Root`-confined: the `*InRoot` APIs use the caller's root dire
 
 ## Install
 
-`go get github.com/cplieger/atomicfile/v2@latest`
+`go get github.com/cplieger/atomicfile/v3@latest`
 
 ## Usage
 
@@ -32,7 +32,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 func main() {
@@ -60,17 +60,9 @@ func main() {
 	pf.Write([]byte("incremental"))
 	pf.Commit(ctx)
 
-	// Preserve existing file permissions across replace.
-	atomicfile.WriteFile(ctx, "/tmp/data.txt", []byte("updated"),
-		atomicfile.WithPreserveMode())
-
 	// Auto-create parent directories.
 	atomicfile.WriteFile(ctx, "/tmp/nested/dir/file.txt", []byte("deep"),
 		atomicfile.WithMkdirMode(0o755))
-
-	// Skip fsync for speed (atomicity without durability).
-	atomicfile.WriteFile(ctx, "/tmp/cache.txt", []byte("fast"),
-		atomicfile.WithNoSync())
 
 	// Confined I/O through an *os.Root (Go 1.24+): name is relative to the root,
 	// and a symlink or ".." in it can never escape the root's tree.
@@ -150,7 +142,7 @@ A mode argument to `mkdir(2)` or `open(2)` is a **request**, not a result. `umas
 - **`mkdir` 0700, remembering whether _this_ call created the level.** `os.MkdirAll` cannot substitute: it stats the path, _follows_ a symlink, finds a directory and returns nil, so it cannot tell "I created this" from "something was already here" — the distinction every decision below turns on.
 - **Open `O_DIRECTORY|O_NOFOLLOW|O_RDONLY`.** The kernel refuses a planted symlink instead of following it (`ErrSymlinkTarget`), refuses anything that is not a directory (`ErrNotDirectory`), and cannot be stalled indefinitely by a planted FIFO.
 - **`fstat` the handle, then require `os.Geteuid()` to own it** (`ErrNotOwned`). Ownership, not just mode: a perfectly-moded 0700 directory owned by another uid passes every other check and its owner can still replace it — with a symlink the caller then follows — _after_ the verdict returns.
-- **If this call created it, `EnforceMode` to 0700.** That is the ACL repair, and it is safe precisely because we made the directory: no other writer has ever held that name. A **pre-existing** directory is refused instead, unless the caller passes `WithRepairOwnedDir()` — which repairs it, because the euid-ownership check has already proved the directory is the caller's own (see the option table). That option exists so a mode fix does not become an outage the first time an app meets a directory an earlier release of itself created.
+- **If this call created it, `EnforceMode` to 0700.** That is the ACL repair, and it is safe precisely because we made the directory: no other writer has ever held that name. A **pre-existing** directory is refused instead, unless the caller passes `WithRepairOwnedDir(true)` — which repairs it, because the euid-ownership check has already proved the directory is the caller's own (see the option table). That option exists so a mode fix does not become an outage the first time an app meets a directory an earlier release of itself created.
 - **If it pre-existed, it is never chmod'ed** and is refused when any group or other bit is set (`ErrModeTooOpen`). Repairing a directory another principal made would take over their name and hand them whatever gets written under it.
 
 **One level per call, deliberately.** `dir`'s parent is not created, inspected, or vouched for; a multi-level path is a loop over the levels, outermost first, because only the caller knows which levels are its own.
@@ -164,7 +156,7 @@ A mode argument to `mkdir(2)` or `open(2)` is a **request**, not a result. `umas
 > operations of an `*os.Root` — which is a different API shape: hold the directory
 > open for its whole lifetime and name only leaves inside it.
 
-Of the functional options only `WithLogger` is consulted, for the one `Warn` a mode repair emits (a filesystem that ignores mode requests is news for every other `mkdir` in the program too). The mode is not a parameter: a "private directory" with a caller-chosen mode is a different primitive.
+Of the functional options, `WithRepairOwnedDir(true)` opts into repairing a too-open directory this same identity already owns, and `WithLogger` supplies the logger for the one `Warn` a mode repair emits (a filesystem that ignores mode requests is news for every other `mkdir` in the program too). The mode is not a parameter: a "private directory" with a caller-chosen mode is a different primitive.
 
 ### Utilities
 
@@ -175,7 +167,7 @@ Of the functional options only `WithLogger` is consulted, for the one `Warn` a m
 
 ### Writability Probe
 
-- `ProbeWritable(ctx, dir, opts ...Option) (ProbeResult, error)`: prove a directory is genuinely writable by doing what a write does — create a temp file, write and flush a byte, close it, unlink it — and report which stage failed. `dir` may be relative; `WithMkdirMode` creates it first, `WithNoSync` skips the flush.
+- `ProbeWritable(ctx, dir, opts ...Option) (ProbeResult, error)`: prove a directory is genuinely writable by doing what a write does — create a temp file, write and flush a byte, close it, unlink it — and report which stage failed. `dir` may be relative; `WithMkdirMode` creates it first.
 - `ProbeWritableInRoot(ctx, root, name, opts ...Option) (ProbeResult, error)`: the same probe confined to an `*os.Root` (`name` is relative to it, `"."` for the root itself), for a caller that already holds a root over the directory it is about to write to. An escaping name is refused by the root.
 
 ```go
@@ -234,7 +226,7 @@ Every atomic write follows the sequence: create temp file → write data → fsy
 
 A nil error means the data reached its final path: the write either fully succeeded or, at worst, was renamed into place but the parent-directory fsync failed (for example an `EIO` from a failing disk; the rename has already completed, and the write logs the fsync failure at `Warn`). `Result.Durable` distinguishes those two outcomes, so a caller that cares about crash durability inspects `Result.Durable` rather than decoding error types. A non-nil error always means the data did **not** reach its final path.
 
-Callers that require strict durability treat `Durable == false` as actionable (retry or alert); callers that only need atomicity can ignore it or use `WithNoSync()` to skip the directory fsync entirely.
+Callers that require strict durability treat `Durable == false` as actionable (retry or alert); callers that only need atomicity can ignore it.
 
 > **Note on auto-created directories.** When `WithMkdirMode` creates new parent
 > directories, only the file's immediate parent is fsynced. The newly created
@@ -247,17 +239,14 @@ Callers that require strict durability treat `Durable == false` as actionable (r
 
 All write functions accept variadic `Option` values. Omit options for defaults.
 
-| Option                     | Description                                                                                                                                                                                                                                               |
-|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `WithLogger(l)`            | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                                                   |
-| `WithMode(mode)`           | File permission (default: `0o644`)                                                                                                                                                                                                                        |
-| `WithMkdirMode(mode)`      | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                                                                                                                              |
-| `WithRepairOwnedDir()`     | `EnsurePrivateDir` only: repair a **pre-existing** directory whose owner is already the effective uid, instead of refusing it. For adopting your own past output; ignored by writes.                                                                      |
-| `WithPreserveMode()`       | Stat the target and reuse its mode (like `renameio.WithExistingPermissions`), falling back to `WithMode` if it does not exist or cannot be stat-ed                                                                                                        |
-| `WithPreserveOwnership()`  | Stat the target and chown the temp to match its uid/gid (requires CAP_CHOWN; no-op when the target is absent, cannot be stat-ed, or off Unix)                                                                                                             |
-| `WithNoSync()`             | Skip fsync for speed (atomicity without durability). `Result.Durable` is then always false.                                                                                                                                                               |
-| `WithMaxBytes(n)`          | Cap staged content at `n` bytes, the write-side mirror of `ReadBounded`. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap.                                                                                 |
-| `WithAllowSymlinkTarget()` | Permit writing to a symlink path (default: refuse with `ErrSymlinkTarget`)                                                                                                                                                                                |
+| Option                       | Description                                                                                                                                                                                                                     |
+|------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `WithLogger(l)`              | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                         |
+| `WithMode(mode)`             | File permission (default: `0o644`)                                                                                                                                                                                              |
+| `WithMkdirMode(mode)`        | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                                                                                                    |
+| `WithRepairOwnedDir(repair)` | `EnsurePrivateDir` only: `true` repairs a **pre-existing** directory whose owner is already the effective uid, instead of refusing it; `false` keeps the default refusal. For adopting your own past output; ignored by writes. |
+| `WithRecursive(recursive)`   | Stale-temp sweeps only: `true` makes `CleanupStaleTemps` / `CleanupStaleTempsInRoot` descend into subdirectories; `false` keeps the default one-directory sweep. Ignored by writes.                                             |
+| `WithMaxBytes(n)`            | Cap staged content at `n` bytes, the write-side mirror of `ReadBounded`. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap.                                                       |
 
 ## Errors
 
@@ -266,11 +255,11 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrEmptyPath`     | The path argument was empty                                                                    |
 | `ErrUnsafePath`    | The path is not absolute or contains a null byte                                               |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
-| `ErrSymlinkTarget` | The target is a symlink and `WithAllowSymlinkTarget` was not set; or `OpenRegular` refused one |
+| `ErrSymlinkTarget` | The target of a write is a symlink (always refused); or `OpenRegular` refused one              |
 | `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named             |
 | `ErrNotDirectory`  | `EnsurePrivateDir`: the name is occupied by a file, FIFO, device node or socket                |
 | `ErrNotOwned`      | `EnsurePrivateDir`: the directory's owner is not the effective uid (or could not be determined)|
-| `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** dir grants group/other access, no `WithRepairOwnedDir`  |
+| `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** dir grants group/other access, no repair opted in       |
 | `ErrModeNotStored` | `EnforceMode`: the mode read back after the chmod is not the mode that was asked for           |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                      |
 
@@ -280,17 +269,7 @@ Failures in the write barrier (open destination / create temp, write, chmod, syn
 
 ## Symlink Safety
 
-By default, all write functions refuse to write to a path that is currently a symlink, returning `ErrSymlinkTarget`. `os.Rename` replaces the symlink itself rather than the file it points to, which is rarely the caller's intent and can lead to data loss or security issues.
-
-To opt in to writing through a symlink (replacing the symlink with a regular file), use `WithAllowSymlinkTarget()`. To write to the link's target instead, resolve it with `filepath.EvalSymlinks` first.
-
-> **Metadata reads under `WithAllowSymlinkTarget`.** The symlink-following stat
-> that `WithPreserveMode` / `WithPreserveOwnership` perform runs through an
-> `os.Root` of the target's parent directory. A symlink target whose destination
-> is absolute or escapes that directory is not followed for the metadata read:
-> preserve-mode falls back to the `WithMode` value and preserve-ownership
-> becomes a no-op for such links (the write itself still replaces the link).
-> Links resolving within the parent directory are followed as normal.
+All write functions refuse to write to a path that is currently a symlink, returning `ErrSymlinkTarget` — unconditionally; there is no opt-out. `os.Rename` replaces the symlink itself rather than the file it points to, which is rarely the caller's intent and can lead to data loss or security issues. Writing through a symlink is not supported; if the link's target is a path you already trust, resolve it with `filepath.EvalSymlinks` and write to the resolved path.
 
 Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself: open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root. `OpenRegularInRoot` is that open, already written; `OpenRegular` is the ambient-path form for a caller holding a full path into a directory it trusts, and it is the one read entry point that does refuse a symlink under the name — `O_NOFOLLOW` has the kernel refuse the open, which a check-then-open sequence cannot do without a race.
 

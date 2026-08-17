@@ -29,7 +29,7 @@ type SweepResult struct {
 // write, confined to root's tree.
 //
 // It sweeps ONE directory by default, exactly as CleanupStaleTemps does; pass
-// WithRecursive to descend. The two functions differ only in the properties named
+// WithRecursive(true) to descend. The two functions differ only in the properties named
 // below, never in how much of the filesystem they touch — that is the caller's
 // explicit choice for both, because the operation deletes files.
 //

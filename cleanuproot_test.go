@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 // stalePFXTemp writes a temp file of this package's own shape, aged past any
@@ -53,7 +53,7 @@ func TestCleanupStaleTempsInRoot_recurses_when_asked(t *testing.T) {
 	}
 	defer root.Close()
 
-	got, err := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive())
+	got, err := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive(true))
 	if err != nil {
 		t.Fatalf("CleanupStaleTempsInRoot = %v, want nil", err)
 	}
@@ -213,7 +213,7 @@ func TestCleanupStaleTempsInRoot_counts_unreadable_separately(t *testing.T) {
 	}
 	defer root.Close()
 
-	got, sweepErr := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive())
+	got, sweepErr := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive(true))
 	if sweepErr != nil {
 		t.Fatalf("CleanupStaleTempsInRoot = %v, want nil: one unreadable subdir must not abort the sweep", sweepErr)
 	}
@@ -251,7 +251,7 @@ func TestCleanupStaleTempsInRoot_refused_candidate_counts_as_failed(t *testing.T
 	}
 	defer root.Close()
 
-	got, sweepErr := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive())
+	got, sweepErr := atomicfile.CleanupStaleTempsInRoot(t.Context(), root, time.Hour, atomicfile.WithRecursive(true))
 	if sweepErr != nil {
 		t.Fatalf("CleanupStaleTempsInRoot = %v, want nil", sweepErr)
 	}
@@ -323,7 +323,7 @@ func TestSweepDepthIsOptIn(t *testing.T) {
 		t.Parallel()
 		dir, top, nested := setup(t)
 
-		removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive())
+		removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive(true))
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 		}
@@ -346,7 +346,7 @@ func TestSweepDepthIsOptIn(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive()); err != nil {
+		if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive(true)); err != nil {
 			t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 		}
 		assertPresent(t, keep, "only this package's own temp shape is ever a candidate")

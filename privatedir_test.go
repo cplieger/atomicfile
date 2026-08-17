@@ -455,7 +455,7 @@ func TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput(t *testing.T)
 	dir := filepath.Join(t.TempDir(), "legacy")
 	mkdirExact(t, dir, 0o770)
 
-	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir())
+	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir(true))
 	if err != nil {
 		t.Fatalf("EnsurePrivateDir with WithRepairOwnedDir refused an owned 0770 dir: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner(t *testing.T) 
 		t.Skipf("chown unavailable: %v", err)
 	}
 
-	if _, err := EnsurePrivateDir(dir, WithRepairOwnedDir()); !errors.Is(err, ErrNotOwned) {
+	if _, err := EnsurePrivateDir(dir, WithRepairOwnedDir(true)); !errors.Is(err, ErrNotOwned) {
 		t.Fatalf("err = %v, want ErrNotOwned even with WithRepairOwnedDir", err)
 	}
 }
@@ -519,7 +519,7 @@ func TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone(t *testin
 	dir := filepath.Join(t.TempDir(), "fine")
 	mkdirExact(t, dir, 0o700)
 
-	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir())
+	pd, err := EnsurePrivateDir(dir, WithRepairOwnedDir(true))
 	if err != nil {
 		t.Fatalf("EnsurePrivateDir: %v", err)
 	}

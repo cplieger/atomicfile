@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 func ExampleWriteFile() {
@@ -91,17 +91,6 @@ func ExampleWriteFile_withMkdirMode() {
 	data, _ := os.ReadFile(path)
 	fmt.Println(string(data))
 	// Output: deep
-}
-
-func ExampleWriteFile_withNoSync() {
-	dir, _ := os.MkdirTemp("", "example")
-	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "cache.txt")
-	res, _ := atomicfile.WriteFile(context.Background(), path, []byte("fast"),
-		atomicfile.WithNoSync())
-	// WithNoSync trades durability for speed, so the result is not durable.
-	fmt.Println(res.Durable)
-	// Output: false
 }
 
 func ExampleWriteReader_withMode() {
@@ -191,7 +180,7 @@ func ExampleCleanupStaleTempsInRoot() {
 	root, _ := os.OpenRoot(dir)
 	defer root.Close()
 
-	res, _ := atomicfile.CleanupStaleTempsInRoot(context.Background(), root, time.Hour, atomicfile.WithRecursive())
+	res, _ := atomicfile.CleanupStaleTempsInRoot(context.Background(), root, time.Hour, atomicfile.WithRecursive(true))
 	fmt.Println(res.Removed, res.Failed, res.Unreadable)
 	// Output: 1 0 0
 }

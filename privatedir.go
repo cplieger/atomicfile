@@ -196,10 +196,11 @@ func chmodBits(m os.FileMode) os.FileMode {
 // filesystem's own error, so a permission failure matches fs.ErrPermission.
 // Match with errors.Is.
 //
-// Of the functional options only WithLogger is consulted, for the one Warn line
-// a mode repair emits; every other Option is ignored (the mode is not a
-// parameter — a "private directory" with a caller-chosen mode is a different
-// primitive, and this one's whole contract is 0700).
+// Of the functional options, WithRepairOwnedDir decides the pre-existing
+// too-open directory case above, and WithLogger supplies the logger for the
+// one Warn line a mode repair emits; every other Option is ignored (the mode
+// is not a parameter — a "private directory" with a caller-chosen mode is a
+// different primitive, and this one's whole contract is 0700).
 func EnsurePrivateDir(dir string, opts ...Option) (PrivateDir, error) {
 	c := buildCfg(opts)
 	clean, err := validateAbsClean(dir)
@@ -227,11 +228,11 @@ func EnsurePrivateDir(dir string, opts ...Option) (PrivateDir, error) {
 		}
 		// WithRepairOwnedDir: the euid-ownership check above has already proved
 		// this directory is ours, which is what makes narrowing it our call
-		// rather than an intrusion. Without the option this is where a caller
+		// rather than an intrusion. With repair declined this is where a caller
 		// meeting its own past output gets refused.
 		if !c.repairOwnedDir {
 			return PrivateDir{}, fmt.Errorf(
-				"%w: %s: mode %#o grants group or other access, and a pre-existing directory is never repaired without WithRepairOwnedDir",
+				"%w: %s: mode %#o grants group or other access, and a pre-existing directory is never repaired without WithRepairOwnedDir(true)",
 				ErrModeTooOpen, clean, found)
 		}
 		stored, repairErr := EnforceMode(f, privateDirMode)

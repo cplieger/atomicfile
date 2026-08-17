@@ -144,7 +144,7 @@ func TestCleanupStaleTempsInRoot_reaps_a_nested_temp_through_the_pin(t *testing.
 		t.Fatalf("setup: Symlink: %v", err)
 	}
 
-	got, err := CleanupStaleTempsInRoot(t.Context(), root, time.Hour, WithRecursive())
+	got, err := CleanupStaleTempsInRoot(t.Context(), root, time.Hour, WithRecursive(true))
 	if err != nil {
 		t.Fatalf("CleanupStaleTempsInRoot = %v, want nil", err)
 	}

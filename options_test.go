@@ -21,17 +21,11 @@ func TestBuildCfg_Defaults(t *testing.T) {
 	if c.logger == nil {
 		t.Error("logger is nil, want slog.Default()")
 	}
-	if c.preserveMode {
-		t.Error("preserveMode should be false by default")
+	if c.recursive {
+		t.Error("recursive should be false by default")
 	}
-	if c.preserveOwnership {
-		t.Error("preserveOwnership should be false by default")
-	}
-	if c.noSync {
-		t.Error("noSync should be false by default")
-	}
-	if c.allowSymlinkTarget {
-		t.Error("allowSymlinkTarget should be false by default")
+	if c.repairOwnedDir {
+		t.Error("repairOwnedDir should be false by default")
 	}
 	if c.mkdirMode != 0 {
 		t.Errorf("mkdirMode = %o, want 0", c.mkdirMode)
@@ -62,28 +56,22 @@ func TestOptions_Threading(t *testing.T) {
 			t.Error("WithLogger did not thread the logger")
 		}
 	})
-	t.Run("WithPreserveMode", func(t *testing.T) {
+	t.Run("WithRepairOwnedDir", func(t *testing.T) {
 		t.Parallel()
-		if c := buildCfg([]Option{WithPreserveMode()}); !c.preserveMode {
-			t.Error("WithPreserveMode() did not set preserveMode")
+		if c := buildCfg([]Option{WithRepairOwnedDir(true)}); !c.repairOwnedDir {
+			t.Error("WithRepairOwnedDir(true) did not set repairOwnedDir")
+		}
+		if c := buildCfg([]Option{WithRepairOwnedDir(false)}); c.repairOwnedDir {
+			t.Error("WithRepairOwnedDir(false) set repairOwnedDir, want the no-option default")
 		}
 	})
-	t.Run("WithPreserveOwnership", func(t *testing.T) {
+	t.Run("WithRecursive", func(t *testing.T) {
 		t.Parallel()
-		if c := buildCfg([]Option{WithPreserveOwnership()}); !c.preserveOwnership {
-			t.Error("WithPreserveOwnership() did not set preserveOwnership")
+		if c := buildCfg([]Option{WithRecursive(true)}); !c.recursive {
+			t.Error("WithRecursive(true) did not set recursive")
 		}
-	})
-	t.Run("WithNoSync", func(t *testing.T) {
-		t.Parallel()
-		if c := buildCfg([]Option{WithNoSync()}); !c.noSync {
-			t.Error("WithNoSync() did not set noSync")
-		}
-	})
-	t.Run("WithAllowSymlinkTarget", func(t *testing.T) {
-		t.Parallel()
-		if c := buildCfg([]Option{WithAllowSymlinkTarget()}); !c.allowSymlinkTarget {
-			t.Error("WithAllowSymlinkTarget() did not set allowSymlinkTarget")
+		if c := buildCfg([]Option{WithRecursive(false)}); c.recursive {
+			t.Error("WithRecursive(false) set recursive, want the no-option default")
 		}
 	})
 }
@@ -93,27 +81,23 @@ func TestOptions_Threading(t *testing.T) {
 func TestOptions_OrderLastWins(t *testing.T) {
 	t.Parallel()
 	c := buildCfg([]Option{
-		WithNoSync(),
+		WithRecursive(true),
 		WithMode(0o600),
-		WithAllowSymlinkTarget(),
+		WithRepairOwnedDir(true),
 		WithMode(0o755), // overrides the earlier mode
 		WithMkdirMode(0o700),
-		WithPreserveOwnership(),
 	})
 	if c.mode != 0o755 {
 		t.Errorf("mode = %o, want 0755 (last wins)", c.mode)
 	}
-	if !c.noSync {
-		t.Error("noSync not set")
+	if !c.recursive {
+		t.Error("recursive not set")
 	}
-	if !c.allowSymlinkTarget {
-		t.Error("allowSymlinkTarget not set")
+	if !c.repairOwnedDir {
+		t.Error("repairOwnedDir not set")
 	}
 	if c.mkdirMode != 0o700 {
 		t.Errorf("mkdirMode = %o, want 0700", c.mkdirMode)
-	}
-	if !c.preserveOwnership {
-		t.Error("preserveOwnership not set")
 	}
 }
 
@@ -126,7 +110,7 @@ func TestOptions_NilElement(t *testing.T) {
 	t.Run("WriteFile", func(t *testing.T) {
 		t.Parallel()
 		p := filepath.Join(t.TempDir(), "f.txt")
-		if _, err := WriteFile(ctx, p, []byte("x"), nil, WithNoSync(), nil); err != nil {
+		if _, err := WriteFile(ctx, p, []byte("x"), nil, WithMode(0o600), nil); err != nil {
 			t.Fatalf("WriteFile with nil option: %v", err)
 		}
 		assertContent(t, p, "x")
@@ -210,8 +194,8 @@ func TestOptions_Logger(t *testing.T) {
 	assertContent(t, path, "data")
 }
 
-// TestOptions_AllCombined_WriteFile threads logger + mode + mkdir + nosync
-// through a single write and pins that each takes effect together.
+// TestOptions_AllCombined_WriteFile threads logger + mode + mkdir through a
+// single write and pins that each takes effect together.
 func TestOptions_AllCombined_WriteFile(t *testing.T) {
 	t.Parallel()
 	if isWindows() {
@@ -223,13 +207,12 @@ func TestOptions_AllCombined_WriteFile(t *testing.T) {
 		WithLogger(l),
 		WithMode(0o600),
 		WithMkdirMode(0o755),
-		WithNoSync(),
 	)
 	if err != nil {
 		t.Fatalf("WriteFile combined opts: %v", err)
 	}
-	if res.Durable {
-		t.Errorf("Result.Durable = true, want false under WithNoSync")
+	if !res.Durable {
+		t.Errorf("Result.Durable = false, want true for a fully synced write")
 	}
 	fi, _ := os.Stat(path)
 	if fi.Mode().Perm() != 0o600 {

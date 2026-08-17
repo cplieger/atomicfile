@@ -228,7 +228,7 @@ func dirEntryNames(t *testing.T, dir string) []string {
 func TestSymlinkTarget(t *testing.T) {
 	t.Parallel()
 
-	t.Run("refuses_symlink_target_by_default", func(t *testing.T) {
+	t.Run("refuses_symlink_target", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
 		real := filepath.Join(dir, "real.txt")
@@ -248,26 +248,6 @@ func TestSymlinkTarget(t *testing.T) {
 			t.Errorf("original file modified: %q", got)
 		}
 		assertNoTempLeak(t, dir)
-	})
-
-	t.Run("allows_symlink_target_with_option", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		real := filepath.Join(dir, "real.txt")
-		if err := os.WriteFile(real, []byte("original"), 0o644); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-		link := filepath.Join(dir, "link.txt")
-		if err := os.Symlink(real, link); err != nil {
-			t.Skipf("symlink unsupported: %v", err)
-		}
-		if _, err := WriteFile(t.Context(), link, []byte("new"), WithAllowSymlinkTarget()); err != nil {
-			t.Fatalf("WriteFile with AllowSymlinkTarget: %v", err)
-		}
-		got, _ := os.ReadFile(link)
-		if string(got) != "new" {
-			t.Errorf("got %q, want %q", got, "new")
-		}
 	})
 
 	t.Run("no_error_for_nonexistent_target", func(t *testing.T) {

@@ -87,61 +87,6 @@ func TestDirSyncFailure_LogsWarn(t *testing.T) {
 	}
 }
 
-// WithNoSync skips the parent-dir fsync entirely, so an injected dir-fsync
-// failure must never be reached: the write succeeds and reports not-durable.
-func TestDirSyncFailure_SkippedWithNoSync(t *testing.T) {
-	sentinel := errors.New("dir fsync must not be called under WithNoSync")
-
-	t.Run("WriteFile", func(t *testing.T) {
-		stubFsyncRootDir(t, sentinel)
-		dir := t.TempDir()
-		path := filepath.Join(dir, "f.txt")
-		res, err := WriteFile(t.Context(), path, []byte("payload"), WithNoSync())
-		if err != nil {
-			t.Fatalf("WriteFile(WithNoSync) = %v, want nil", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
-		}
-		assertContent(t, path, "payload")
-	})
-
-	t.Run("WriteReader", func(t *testing.T) {
-		stubFsyncRootDir(t, sentinel)
-		dir := t.TempDir()
-		path := filepath.Join(dir, "f.txt")
-		res, err := WriteReader(t.Context(), path, strings.NewReader("payload"), WithNoSync())
-		if err != nil {
-			t.Fatalf("WriteReader(WithNoSync) = %v, want nil", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
-		}
-		assertContent(t, path, "payload")
-	})
-
-	t.Run("PendingFile.Commit", func(t *testing.T) {
-		stubFsyncRootDir(t, sentinel)
-		dir := t.TempDir()
-		path := filepath.Join(dir, "f.txt")
-		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
-		if err != nil {
-			t.Fatalf("NewPendingFile() = %v", err)
-		}
-		if _, err := pf.WriteString("payload"); err != nil {
-			t.Fatalf("WriteString() = %v", err)
-		}
-		res, err := pf.Commit(t.Context())
-		if err != nil {
-			t.Fatalf("Commit(WithNoSync) = %v, want nil", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
-		}
-		assertContent(t, path, "payload")
-	})
-}
-
 // The production fsyncRootDir is replaced by a stub in every other dir-sync
 // test. This pins the real implementation directly: a valid directory syncs
 // cleanly, and a missing directory surfaces the open error. Serial (no

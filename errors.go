@@ -13,8 +13,8 @@ var (
 	// write cap (there it arrives wrapped, sometimes inside a *WriteError;
 	// match with errors.Is).
 	ErrFileTooLarge = errors.New("atomicfile: file too large")
-	// ErrSymlinkTarget is returned when the target path is a symlink and
-	// WithAllowSymlinkTarget was not set.
+	// ErrSymlinkTarget is returned when the target path is a symlink, which
+	// every write entry point and OpenRegular refuse.
 	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
 	// ErrNotRegular is returned by ReadBoundedInRoot when the name resolves to
 	// something other than a regular file — a directory, named pipe, device node or
@@ -64,10 +64,9 @@ var (
 
 // WritePhase identifies which step of an atomic write failed. Each value
 // appears only on a WriteError, which is returned exclusively for hard failures
-// (the data did not reach its final path). Two outcomes are deliberately absent
-// from this enum because they are not hard failures: a parent-directory fsync
-// failure (surfaced via Result.Durable) and a preserve-ownership chown failure
-// (best-effort, logged at Warn).
+// (the data did not reach its final path). One outcome is deliberately absent
+// from this enum because it is not a hard failure: a parent-directory fsync
+// failure, which is surfaced via Result.Durable.
 type WritePhase int
 
 const (

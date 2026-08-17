@@ -146,27 +146,6 @@ func TestPendingFile(t *testing.T) {
 			t.Errorf("got %q", got)
 		}
 	})
-
-	t.Run("nosync_not_durable", func(t *testing.T) {
-		t.Parallel()
-		dir := t.TempDir()
-		path := filepath.Join(dir, "nosync.txt")
-		pf, err := NewPendingFile(t.Context(), path, WithNoSync())
-		if err != nil {
-			t.Fatalf("NewPendingFile: %v", err)
-		}
-		defer func() { _ = pf.Cleanup() }()
-		if _, err := pf.Write([]byte("fast")); err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		res, err := pf.Commit(t.Context())
-		if err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
-		if res.Durable {
-			t.Errorf("Result.Durable = true, want false under WithNoSync")
-		}
-	})
 }
 
 func TestPendingFile_ConcurrentSamePath(t *testing.T) {
@@ -179,7 +158,7 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			pf, err := NewPendingFile(t.Context(), path, WithNoSync())
+			pf, err := NewPendingFile(t.Context(), path)
 			if err != nil {
 				return
 			}
