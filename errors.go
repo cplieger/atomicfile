@@ -15,7 +15,8 @@ var (
 	ErrFileTooLarge = errors.New("atomicfile: file too large")
 	// ErrSymlinkTarget is returned when the target path is a symlink, which
 	// every write entry point and OpenRegular refuse.
-	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink") // ErrNotRegular is returned when a name resolves to something other than a
+	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
+	// ErrNotRegular is returned when a name resolves to something other than a
 	// regular file — a directory, named pipe, device node or socket — where this
 	// package will only act on a regular one: ReadBoundedInRoot refuses to read
 	// it, RemoveFileInRoot refuses to unlink it, and every write entry point
