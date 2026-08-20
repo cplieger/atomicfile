@@ -287,8 +287,7 @@ func (r *ProbeResult) recordTeardown(stage ProbeStage, err error, c *cfg) {
 // reach its final path", which is a claim about a write the probe never
 // performed; ProbeResult.Stage already carries the stage.
 func probeCause(err error) error {
-	var we *WriteError
-	if errors.As(err, &we) {
+	if we, ok := errors.AsType[*WriteError](err); ok {
 		return we.Err
 	}
 	return err

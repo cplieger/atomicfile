@@ -66,8 +66,10 @@ The seam follows these rules:
 
 ## Local development
 
-The module targets the Go version pinned in `go.mod` (the code uses
-`errors.AsType`, a 1.26 generic). Use that toolchain or newer.
+The module targets the Go version pinned in `go.mod`. The newest standard-library
+symbols it uses are `errors.AsType` (1.26) and `sync.WaitGroup.Go` (1.25, tests
+only); the load-bearing floor is `os.Root` (1.24) plus its expanded method set
+(1.25). Use the pinned toolchain or newer.
 
 ```sh
 go build ./...

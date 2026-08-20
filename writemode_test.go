@@ -107,9 +107,9 @@ func TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored(t *testing.T) {
 	if !errors.Is(werr, ErrModeNotStored) {
 		t.Error("errors.Is(*WriteError, ErrModeNotStored) = false; a caller cannot tell a refused mode from any other write failure")
 	}
-	var we *WriteError
-	if !errors.As(werr, &we) {
-		t.Fatal("errors.As(*WriteError) = false")
+	we, ok := errors.AsType[*WriteError](werr)
+	if !ok {
+		t.Fatal("errors.AsType[*WriteError] = false")
 	}
 	if we.Phase != PhaseTempChmod {
 		t.Errorf("phase = %v, want PhaseTempChmod", we.Phase)

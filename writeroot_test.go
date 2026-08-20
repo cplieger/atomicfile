@@ -111,8 +111,8 @@ func TestWriteReaderInRoot(t *testing.T) {
 		root, dir := openTestRoot(t)
 		r := plainReader{r: &errReader{n: 4, err: errors.New("simulated IO error")}}
 		_, err := WriteReaderInRoot(t.Context(), root, "broken", r)
-		var we *WriteError
-		if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
+		we, ok := errors.AsType[*WriteError](err)
+		if !ok || we.Phase != PhaseTempWrite {
 			t.Fatalf("err = %v, want WriteError{PhaseTempWrite}", err)
 		}
 		if _, statErr := os.Stat(filepath.Join(dir, "broken")); !errors.Is(statErr, fs.ErrNotExist) {
@@ -125,8 +125,8 @@ func TestWriteReaderInRoot(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
 		_, err := WriteReaderInRoot(t.Context(), root, "broken", &errWriterTo{err: errors.New("WriterTo failure")})
-		var we *WriteError
-		if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
+		we, ok := errors.AsType[*WriteError](err)
+		if !ok || we.Phase != PhaseTempWrite {
 			t.Fatalf("err = %v, want WriteError{PhaseTempWrite}", err)
 		}
 		assertNoTempLeak(t, dir)

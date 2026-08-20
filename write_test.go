@@ -128,8 +128,8 @@ func TestWriteFile(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for missing parent without WithMkdirMode")
 		}
-		var we *WriteError
-		if !errors.As(err, &we) {
+		we, ok := errors.AsType[*WriteError](err)
+		if !ok {
 			t.Fatalf("error = %T (%v), want *WriteError", err, err)
 		}
 		if we.Phase != PhaseTempCreate {
@@ -175,8 +175,8 @@ func TestWriteFile_ro_dir(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for read-only dir")
 	}
-	var we *WriteError
-	if !errors.As(err, &we) {
+	we, ok := errors.AsType[*WriteError](err)
+	if !ok {
 		t.Fatalf("error = %T, want *WriteError", err)
 	}
 	if we.Phase != PhaseTempCreate {
@@ -219,8 +219,8 @@ func TestWriteReader_RenameFailure_ReportsRenamePhase(t *testing.T) {
 	if err == nil {
 		t.Fatal("WriteReader(target occupied mid-write) = nil, want error")
 	}
-	var we *WriteError
-	if !errors.As(err, &we) {
+	we, ok := errors.AsType[*WriteError](err)
+	if !ok {
 		t.Fatalf("error = %T, want *WriteError", err)
 	}
 	if we.Phase != PhaseRename {
@@ -364,8 +364,8 @@ func TestWriteReader_ErroringReader_CleansUpTemp(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from erroring reader")
 	}
-	var we *WriteError
-	if !errors.As(err, &we) {
+	we, ok := errors.AsType[*WriteError](err)
+	if !ok {
 		t.Fatalf("error = %T, want *WriteError", err)
 	}
 	if we.Phase != PhaseTempWrite {
@@ -494,8 +494,7 @@ func TestWriteFile_MkdirMode_ParentNotWritable_WrapsError(t *testing.T) {
 	if !errors.Is(err, os.ErrPermission) {
 		t.Errorf("error = %v, want it to wrap os.ErrPermission", err)
 	}
-	var we *WriteError
-	if errors.As(err, &we) {
+	if we, ok := errors.AsType[*WriteError](err); ok {
 		t.Errorf("error is *WriteError{Phase=%v}, want a plain wrapped error", we.Phase)
 	}
 	assertNoTempLeak(t, dir)
@@ -508,11 +507,9 @@ func TestWriteFile_ConcurrentSamePath(t *testing.T) {
 	var wg sync.WaitGroup
 	const N = 30
 	for i := range N {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			_, _ = WriteFile(t.Context(), path, []byte(strings.Repeat("A", idx+1)))
-		}(i)
+		wg.Go(func() {
+			_, _ = WriteFile(t.Context(), path, []byte(strings.Repeat("A", i+1)))
+		})
 	}
 	wg.Wait()
 	got, err := os.ReadFile(path)
@@ -532,11 +529,9 @@ func TestWriteReader_ConcurrentSamePath(t *testing.T) {
 	var wg sync.WaitGroup
 	const N = 15
 	for i := range N {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			_, _ = WriteReader(t.Context(), p, bytes.NewReader(bytes.Repeat([]byte{byte(idx)}, idx+1)))
-		}(i)
+		wg.Go(func() {
+			_, _ = WriteReader(t.Context(), p, bytes.NewReader(bytes.Repeat([]byte{byte(i)}, i+1)))
+		})
 	}
 	wg.Wait()
 	assertNoTempLeak(t, dir)
@@ -625,8 +620,8 @@ func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteReader(WriterTo, cancel-during-write) = %v, want context.Canceled", err)
 	}
-	var we *WriteError
-	if !errors.As(err, &we) || we.Phase != PhaseTempWrite {
+	we, ok := errors.AsType[*WriteError](err)
+	if !ok || we.Phase != PhaseTempWrite {
 		t.Fatalf("error = %v, want *WriteError{PhaseTempWrite}", err)
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {

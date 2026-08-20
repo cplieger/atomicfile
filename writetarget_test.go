@@ -55,8 +55,7 @@ func TestWriteTarget_RefusesANonRegularOccupant(t *testing.T) {
 		if !errors.Is(err, ErrNotRegular) {
 			t.Fatalf("WriteFile(over a directory) = %v, want errors.Is ErrNotRegular", err)
 		}
-		var we *WriteError
-		if errors.As(err, &we) {
+		if we, ok := errors.AsType[*WriteError](err); ok {
 			t.Errorf("error is *WriteError{Phase=%v}, want a pre-barrier refusal", we.Phase)
 		}
 		assertNoTempLeak(t, dir)

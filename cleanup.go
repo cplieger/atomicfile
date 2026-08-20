@@ -39,11 +39,20 @@ func isAllDigits(s string) bool {
 // requirement mirrors randomTempName's decimal middle exactly, so a
 // caller-owned file that merely shares the prefix and suffix (e.g.
 // ".atomicfile-notes.tmp") is never matched and never deleted.
+//
+// CutPrefix and CutSuffix rather than HasPrefix/HasSuffix plus a hand-computed
+// slice: the arithmetic form was correct, but only because the prefix and suffix
+// cannot overlap, so a reader had to prove that before believing the bounds.
+// Cutting removes the argument along with the arithmetic.
 func isStaleTempName(name string) bool {
-	if !strings.HasPrefix(name, tempPrefix) || !strings.HasSuffix(name, tempSuffix) {
+	middle, ok := strings.CutPrefix(name, tempPrefix)
+	if !ok {
 		return false
 	}
-	middle := name[len(tempPrefix) : len(name)-len(tempSuffix)]
+	middle, ok = strings.CutSuffix(middle, tempSuffix)
+	if !ok {
+		return false
+	}
 	return isAllDigits(middle)
 }
 

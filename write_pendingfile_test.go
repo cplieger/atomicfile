@@ -155,19 +155,17 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 	var wg sync.WaitGroup
 	const N = 20
 	for i := range N {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
+		wg.Go(func() {
 			pf, err := NewPendingFile(t.Context(), path)
 			if err != nil {
 				return
 			}
 			defer func() { _ = pf.Cleanup() }()
-			if _, err := pf.Write([]byte(strings.Repeat("Z", idx+1))); err != nil {
+			if _, err := pf.Write([]byte(strings.Repeat("Z", i+1))); err != nil {
 				return
 			}
 			_, _ = pf.Commit(t.Context())
-		}(i)
+		})
 	}
 	wg.Wait()
 	got, err := os.ReadFile(path)
@@ -368,8 +366,8 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	}
 
 	firstRes, firstErr := pf.Commit(t.Context())
-	var we *WriteError
-	if !errors.As(firstErr, &we) || we.Phase != PhaseTempChmod {
+	we, ok := errors.AsType[*WriteError](firstErr)
+	if !ok || we.Phase != PhaseTempChmod {
 		t.Fatalf("first Commit = %v, want *WriteError{PhaseTempChmod}", firstErr)
 	}
 	if firstRes != (Result{}) {
@@ -421,8 +419,8 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 	}
 
 	_, firstErr := pf.Commit(t.Context())
-	var we *WriteError
-	if !errors.As(firstErr, &we) || we.Phase != PhaseRename {
+	we, ok := errors.AsType[*WriteError](firstErr)
+	if !ok || we.Phase != PhaseRename {
 		t.Fatalf("Commit(onto non-empty dir) = %v, want *WriteError{PhaseRename}", firstErr)
 	}
 
