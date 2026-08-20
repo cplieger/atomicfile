@@ -218,22 +218,17 @@ The zero `FileIdentity` records nothing and reports `Changed`, which is the fail
 ```go
 type Result struct {
 	Path    string // cleaned final path (absolute for the package-level writers; root-relative for WriteFileInRoot/WriteReaderInRoot)
-	Durable bool   // true only when file + parent-dir fsync both completed
+	Durable bool   // true only when the file and every directory its path depends on were fsynced
 }
 ```
 
 Every atomic write follows the sequence: create temp file → write data → fsync temp → close → rename to final path → fsync parent directory. After a crash the file contains either the complete old content or the complete new content, never a partial write. The directory fsync makes the rename durable even if the system loses power immediately after the call returns.
 
-A nil error means the data reached its final path: the write either fully succeeded or, at worst, was renamed into place but the parent-directory fsync failed (for example an `EIO` from a failing disk; the rename has already completed, and the write logs the fsync failure at `Warn`). `Result.Durable` distinguishes those two outcomes, so a caller that cares about crash durability inspects `Result.Durable` rather than decoding error types. A non-nil error always means the data did **not** reach its final path.
+A nil error means the data reached its final path: the write either fully succeeded or, at worst, was renamed into place but a directory fsync failed (for example an `EIO` from a failing disk; the rename has already completed, and the write logs the fsync failure at `Warn`). `Result.Durable` distinguishes those two outcomes, so a caller that cares about crash durability inspects `Result.Durable` rather than decoding error types. A non-nil error always means the data did **not** reach its final path.
 
 Callers that require strict durability treat `Durable == false` as actionable (retry or alert); callers that only need atomicity can ignore it.
 
-> **Note on auto-created directories.** When `WithMkdirMode` creates new parent
-> directories, only the file's immediate parent is fsynced. The newly created
-> intermediate directories are not fsynced into their own parents, so the
-> durability guarantee above applies only when the full parent path already
-> exists. If you need durability into a freshly created directory tree, create
-> and fsync the directories before writing.
+`WithMkdirMode` is covered by the same guarantee. Each directory the write creates has its own parent fsynced as it is made, because a directory entry that was never fsynced into its parent can vanish in a crash and take the whole subtree with it — including a file that was itself fsynced and renamed. A three-level `WithMkdirMode` write therefore fsyncs four directories, and `Result.Durable` is false if any of them failed.
 
 ## Functional Options
 
@@ -243,7 +238,7 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 |------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `WithLogger(l)`              | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                         |
 | `WithMode(mode)`             | File permission (default: `0o644`)                                                                                                                                                                                              |
-| `WithMkdirMode(mode)`        | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error.                                                                                                    |
+| `WithMkdirMode(mode)`        | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error. The mode is enforced on each directory created (a request through `mkdir(2)` is narrowed by umask and can be widened by an ACL) and each one's parent is fsynced.                                                    |
 | `WithRepairOwnedDir(repair)` | `EnsurePrivateDir` only: `true` repairs a **pre-existing** directory whose owner is already the effective uid, instead of refusing it; `false` keeps the default refusal. For adopting your own past output; ignored by writes. |
 | `WithRecursive(recursive)`   | Stale-temp sweeps only: `true` makes `CleanupStaleTemps` / `CleanupStaleTempsInRoot` descend into subdirectories; `false` keeps the default one-directory sweep. Ignored by writes.                                             |
 | `WithMaxBytes(n)`            | Cap staged content at `n` bytes, the write-side mirror of `ReadBounded`. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap.                                                       |

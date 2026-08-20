@@ -8,9 +8,10 @@
 // WriteReaderInRoot, and PendingFile.Commit)
 // return a Result alongside an error. A nil error means the data reached its
 // final path; the write either fully succeeded or, at worst, was renamed into
-// place but the parent-directory fsync failed. Result.Durable distinguishes
-// those two outcomes: it is true only when both the file and its parent
-// directory were fsynced, so a caller that cares about crash durability
+// place but a directory fsync failed. Result.Durable distinguishes those two
+// outcomes: it is true only when the file and every directory its path depends
+// on were fsynced — the file, its parent, and each parent the write created
+// under WithMkdirMode — so a caller that cares about crash durability
 // inspects Result.Durable rather than decoding error types. A non-nil error
 // always means the data did NOT reach its final path.
 //
@@ -104,13 +105,16 @@
 // are the same call, and it observes no pathname — a chmod-then-stat by name can
 // chmod one object and certify another.
 //
-// The write path uses it on itself, in two places. The staging file is created
+// The write path uses it on itself, in three places. The staging file is created
 // owner-only and PROVED owner-only before the caller's payload goes into it —
 // the temp has to share the target's parent directory, so on a widening
 // filesystem it would otherwise hold the payload group-readable and
 // group-writable for the whole write. Then WithMode's mode is enforced rather
 // than merely requested before the rename publishes it, so a filesystem that
-// refuses the mode fails the write instead of publishing a wider file.
+// refuses the mode fails the write instead of publishing a wider file. And each
+// directory WithMkdirMode creates is enforced as it is made, since a mode
+// narrowed by umask or widened by an ACL on the directory holding the file is
+// the same defect one level up.
 //
 // EnsurePrivateDir is the custody composition around it, for a process
 // establishing a directory only its own user may enter inside a parent others can
@@ -147,7 +151,10 @@
 // Every write runs through an *os.Root: the *InRoot functions use the
 // caller's root directly, and the absolute-path functions open the target's
 // parent directory as a root and write through it. The absolute-path surface
-// is therefore a thin adapter over one confined write engine.
+// is therefore a thin adapter over one confined write engine. WithMkdirMode's
+// directory creation runs through a root too — one opened on the deepest
+// ancestor that already exists, so every level the write ADDS is created
+// openat-relative rather than by ambient path resolution.
 //
 // # Confined traversal and removal
 //

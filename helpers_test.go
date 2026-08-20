@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -220,4 +222,69 @@ func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
 		}
 	}
 	return n
+}
+
+// recordFsyncRootDir replaces the package fsyncRootDir seam with one that
+// records every (root name, dir) pair it is asked to sync and then runs the
+// original, restoring it when the test finishes. It returns a function that
+// reports the recorded dirs in call order.
+//
+// Tests using it must not call t.Parallel: they mutate package state.
+func recordFsyncRootDir(t *testing.T) func() []string {
+	t.Helper()
+	orig := fsyncRootDir
+	t.Cleanup(func() { fsyncRootDir = orig })
+	var mu sync.Mutex
+	var seen []string
+	fsyncRootDir = func(root *os.Root, dir string) error {
+		mu.Lock()
+		seen = append(seen, dir)
+		mu.Unlock()
+		return orig(root, dir)
+	}
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(seen)
+	}
+}
+
+// withUmask sets the process umask for the duration of the test and restores it
+// afterwards. The umask is process-global, so a test using it must not call
+// t.Parallel.
+//
+// It exists because a mode passed to mkdir(2) is a REQUEST that umask narrows,
+// which is the whole reason mkdirAllInRoot enforces the mode instead of trusting
+// it. A test run under the usual 022 cannot tell an enforced mode from a
+// requested one.
+func withUmask(t *testing.T, mask int) {
+	t.Helper()
+	prev := syscall.Umask(mask)
+	t.Cleanup(func() { syscall.Umask(prev) })
+}
+
+// assertDirMode fails t unless the directory at path stores exactly want in the
+// bits chmod(2) can set.
+func assertDirMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q) = %v", path, err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("Stat(%q) is not a directory (mode %s)", path, fi.Mode())
+	}
+	if got := chmodBits(fi.Mode()); got != want {
+		t.Errorf("mode of %q = %#o, want %#o", path, got, want)
+	}
+}
+
+// captureWarn returns a logger that records Warn and above into a buffer, plus a
+// function that reports what has been logged. It is an explicit logger passed
+// through WithLogger, not a swap of slog.Default(), so it needs no serialization
+// of its own.
+func captureWarn() (logger *slog.Logger, logged func() string) {
+	var buf bytes.Buffer
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	return slog.New(h), buf.String
 }

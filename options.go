@@ -87,7 +87,24 @@ func WithMode(mode os.FileMode) Option {
 
 // WithMkdirMode creates the parent directory (and any missing ancestors) with
 // the given permission before writing. Without it, a missing parent directory
-// is an error.
+// is an error. It applies to every write entry point and is ignored by the
+// sweeps and by EnsurePrivateDir, whose mode is not a parameter.
+//
+// The mode is ENFORCED on each directory this call creates, not merely
+// requested. mkdir(2) puts a mode through umask and an inheritable ACL can widen
+// the result, so without the enforcement the option would be a suggestion:
+// measured under umask 077, a requested 0o755 stored 0o700 on every created
+// level. A filesystem that will not store the mode fails the write with
+// ErrModeNotStored rather than publishing into a directory of the wrong shape,
+// matching what WithMode does for the file. A PRE-EXISTING directory is never
+// chmod'ed — it belongs to whoever made it, the same rule EnsurePrivateDir
+// applies.
+//
+// Each created directory's own parent is fsynced as it is made, so a crash
+// cannot lose a directory entry the published file depends on. Result.Durable is
+// false when any of those fsyncs failed; the write still succeeds, because a
+// filesystem that refuses to fsync a directory must not make a mkdir write an
+// error while the same write into an existing directory succeeds.
 func WithMkdirMode(mode os.FileMode) Option {
 	return func(c *cfg) { c.mkdirMode = mode }
 }
