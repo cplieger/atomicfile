@@ -58,8 +58,13 @@ type SweepResult struct {
 // are details the counts cannot carry.
 //
 // maxAge must be positive; a non-positive value skips the sweep with a warning
-// rather than reaping everything. Only names matching this package's own temp shape
-// are candidates, so a caller-owned file is never removed.
+// rather than reaping everything. It must also exceed the longest time any
+// CONCURRENT writer may hold a temp — a sweep cannot tell an orphan from a write
+// in progress, and the age gate is the temp's mtime, so what is at risk is a temp
+// nothing has written to for maxAge (a PendingFile staged and committed slowly is
+// the realistic case; see CleanupStaleTemps for the measurement). Only names
+// matching this package's own temp shape are candidates, so a caller-owned file is
+// never removed.
 //
 // The caller owns root; CleanupStaleTempsInRoot does not close it.
 func CleanupStaleTempsInRoot(ctx context.Context, root *os.Root, maxAge time.Duration, opts ...Option) (SweepResult, error) {
