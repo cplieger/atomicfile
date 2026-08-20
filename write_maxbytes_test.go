@@ -94,8 +94,8 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("err = %v, want ErrFileTooLarge through the WriteError wrap", err)
 	}
-	var wErr *WriteError
-	if !errors.As(err, &wErr) || wErr.Phase != PhaseTempWrite {
+	wErr, ok := errors.AsType[*WriteError](err)
+	if !ok || wErr.Phase != PhaseTempWrite {
 		t.Errorf("err = %v, want a *WriteError in PhaseTempWrite", err)
 	}
 	requireIntactTarget(t, path, previous)
