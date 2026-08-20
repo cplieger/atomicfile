@@ -288,3 +288,22 @@ func captureWarn() (logger *slog.Logger, logged func() string) {
 	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
 	return slog.New(h), buf.String
 }
+
+// occupyOnRead runs occupy once, on the first Read, before delegating. It exists
+// to land a filesystem change in the window between the pre-write target guard
+// and the rename — the one window the guard cannot close — so the PhaseRename arm
+// stays reachable deterministically. It deliberately does NOT implement
+// io.WriterTo, keeping the copy on the per-Read path.
+type occupyOnRead struct {
+	r      io.Reader
+	occupy func()
+	done   bool
+}
+
+func (o *occupyOnRead) Read(p []byte) (int, error) {
+	if !o.done {
+		o.done = true
+		o.occupy()
+	}
+	return o.r.Read(p)
+}

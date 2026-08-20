@@ -392,20 +392,16 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// The PendingFile rename-failure branch: committing onto a NON-EMPTY directory
-// forces os.Rename to fail with ENOTEMPTY on every platform without test seams.
-// The first Commit must tag PhaseRename and clean the temp; a second Commit must
-// replay the same cached error.
+// The rename-failure branch, reached the only way that survives the pre-write
+// target guard: the guard runs at construction and the rename runs at Commit, so
+// planting a directory at the target in between exercises exactly the race the
+// guard cannot close (rename(2) has no "only if the destination is a regular
+// file" mode). The first Commit must tag PhaseRename and clean the temp; a second
+// Commit must replay the same cached error.
 func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target-dir")
-	if err := os.Mkdir(target, 0o755); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "blocker"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed blocker: %v", err)
-	}
 
 	pf, err := NewPendingFile(t.Context(), target)
 	if err != nil {
@@ -413,6 +409,15 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 	}
 	if _, err := pf.Write([]byte("payload")); err != nil {
 		t.Fatalf("Write: %v", err)
+	}
+
+	// Now occupy the target with a NON-EMPTY directory, which makes rename fail
+	// with ENOTEMPTY on every platform without a test seam.
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed blocker: %v", err)
 	}
 
 	_, firstErr := pf.Commit(t.Context())

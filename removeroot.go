@@ -50,19 +50,15 @@ func OpenParentInRoot(root *os.Root, name string) (*os.Root, string, error) {
 	if root == nil {
 		return nil, "", errors.New("atomicfile: nil root")
 	}
-	clean, err := validateRootName(name)
+	clean, err := validateRootEntry(name)
 	if err != nil {
 		return nil, "", err
-	}
-	base := filepath.Base(clean)
-	if base == "." || base == ".." || base == string(filepath.Separator) {
-		return nil, "", fmt.Errorf("%w: names no entry: %q", ErrUnsafePath, name)
 	}
 	parent, err := pinDirInRoot(root, filepath.Dir(clean))
 	if err != nil {
 		return nil, "", err
 	}
-	return parent, base, nil
+	return parent, filepath.Base(clean), nil
 }
 
 // RemoveFileInRoot removes the regular file at name inside root, unlinking it through a

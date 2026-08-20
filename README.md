@@ -248,10 +248,10 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | Sentinel           | Meaning                                                                                        |
 |--------------------|------------------------------------------------------------------------------------------------|
 | `ErrEmptyPath`     | The path argument was empty                                                                    |
-| `ErrUnsafePath`    | The path is not absolute or contains a null byte                                               |
+| `ErrUnsafePath`    | The path is not absolute, contains a null byte, or names no entry (`.`, `..`)                   |
 | `ErrFileTooLarge`  | The file exceeded the `ReadBounded` size limit, or content exceeded a `WithMaxBytes` write cap |
 | `ErrSymlinkTarget` | The target of a write is a symlink (always refused); or `OpenRegular` refused one              |
-| `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named             |
+| `ErrNotRegular`    | Name resolved to a non-regular file (dir, FIFO, device, socket); the mode is named. Refused on read, unlink **and write** |
 | `ErrNotDirectory`  | `EnsurePrivateDir`: the name is occupied by a file, FIFO, device node or socket                |
 | `ErrNotOwned`      | `EnsurePrivateDir`: the directory's owner is not the effective uid (or could not be determined)|
 | `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** dir grants group/other access, no repair opted in       |
@@ -265,6 +265,8 @@ Failures in the write barrier (open destination / create temp, write, chmod, syn
 ## Symlink Safety
 
 All write functions refuse to write to a path that is currently a symlink, returning `ErrSymlinkTarget` — unconditionally; there is no opt-out. `os.Rename` replaces the symlink itself rather than the file it points to, which is rarely the caller's intent and can lead to data loss or security issues. Writing through a symlink is not supported; if the link's target is a path you already trust, resolve it with `filepath.EvalSymlinks` and write to the resolved path.
+
+They also refuse a target already occupied by anything else that is not a **regular file**, returning `ErrNotRegular` — the same verdict `ReadBoundedInRoot` gives what it will read and `RemoveFileInRoot` gives what it will unlink. `rename(2)` overwrites any non-directory, so without the refusal a write whose target was a FIFO, socket or device node succeeded and reported `Durable`, silently destroying an object this package never created; a directory target failed only at `PhaseRename`, after a complete staged write and both fsyncs. An existing regular file is still overwritten, which is the point of the package. The check is a check-then-act and cannot be otherwise — `rename(2)` has no "only if the destination is a regular file" mode — so its value is refusing the states that are there to be found, not winning a race, and the race it can lose is bounded by rename never following a final-component symlink.
 
 Reads behave differently: `ReadBounded` follows symlinks by design (`os.Open` resolves them), so it does NOT refuse a symlink at `path`. When reading from a directory writable by a less-trusted principal, confine the path yourself: open the file through an `*os.Root` (Go 1.24+) and read it with `ReadBoundedFile`, which applies the same size and context bounds without following symlinks out of the root. `OpenRegularInRoot` is that open, already written; `OpenRegular` is the ambient-path form for a caller holding a full path into a directory it trusts, and it is the one read entry point that does refuse a symlink under the name — `O_NOFOLLOW` has the kernel refuse the open, which a check-then-open sequence cannot do without a race.
 

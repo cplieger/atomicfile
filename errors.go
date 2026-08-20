@@ -15,13 +15,17 @@ var (
 	ErrFileTooLarge = errors.New("atomicfile: file too large")
 	// ErrSymlinkTarget is returned when the target path is a symlink, which
 	// every write entry point and OpenRegular refuse.
-	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
-	// ErrNotRegular is returned by ReadBoundedInRoot when the name resolves to
-	// something other than a regular file — a directory, named pipe, device node or
-	// socket. It is a distinct sentinel because a caller that maps failures onto
-	// protocol responses (an HTTP handler answering 400 for a directory but 404 for a
-	// missing file) has to tell this case apart from the others; the error text names
-	// the actual mode for diagnosis. Match with errors.Is.
+	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink") // ErrNotRegular is returned when a name resolves to something other than a
+	// regular file — a directory, named pipe, device node or socket — where this
+	// package will only act on a regular one: ReadBoundedInRoot refuses to read
+	// it, RemoveFileInRoot refuses to unlink it, and every write entry point
+	// refuses to publish over it (rename(2) would otherwise replace a pipe or a
+	// device node with a regular file, so a caller could be tricked into
+	// destroying an object it never created). It is a distinct sentinel because a
+	// caller that maps failures onto protocol responses (an HTTP handler
+	// answering 400 for a directory but 404 for a missing file) has to tell this
+	// case apart from the others; the error text names the actual mode for
+	// diagnosis. A symlink keeps its own ErrSymlinkTarget. Match with errors.Is.
 	ErrNotRegular = errors.New("atomicfile: not a regular file")
 	// ErrNotDirectory is returned by EnsurePrivateDir when the name is occupied by
 	// something other than a directory — a plain file, named pipe, device node or
