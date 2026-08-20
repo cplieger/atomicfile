@@ -129,8 +129,7 @@ func TestEnforceModeNilFile(t *testing.T) {
 // in a temp directory without dropping thread credentials underneath a parallel
 // suite; and ErrModeNotStored is a property of the MOUNT — a filesystem that
 // stores something other than what chmod set — which is exactly the failure the
-// declined Result.Mode proposal noted could not be staged locally either (see the
-// atomicfile steering doc). Both would need an injection seam whose only consumer
+// declined Result.Mode proposal noted could not be staged locally either. Both would need an injection seam whose only consumer
 // is the test that exercises it, which this package does not add for a branch that
 // returns the filesystem's own error unchanged.
 
