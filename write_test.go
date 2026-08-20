@@ -201,16 +201,23 @@ func TestWriteFile_ZeroPerm(t *testing.T) {
 	_ = os.Chmod(path, 0o644)
 }
 
-func TestWriteFile_RenameFailure_ReportsRenamePhase(t *testing.T) {
+// The rename-failure branch on a single-call write, reached the only way that
+// survives the pre-write target guard: the guard runs before the caller's data is
+// streamed, so a reader that plants a directory at the target as a side effect of
+// Read lands between the guard and the rename. That is exactly the race the guard
+// cannot close, since rename(2) has no "only if the destination is a regular
+// file" mode.
+func TestWriteReader_RenameFailure_ReportsRenamePhase(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	target := filepath.Join(dir, "iam-a-dir")
-	if err := os.Mkdir(target, 0o755); err != nil {
-		t.Fatalf("Mkdir: %v", err)
-	}
-	_, err := WriteFile(t.Context(), target, []byte("data"))
+
+	src := &occupyOnRead{r: plainReader{r: strings.NewReader("data")}, occupy: func() {
+		_ = os.Mkdir(target, 0o755)
+	}}
+	_, err := WriteReader(t.Context(), target, src)
 	if err == nil {
-		t.Fatal("WriteFile(dir target) = nil, want error")
+		t.Fatal("WriteReader(target occupied mid-write) = nil, want error")
 	}
 	var we *WriteError
 	if !errors.As(err, &we) {
@@ -219,6 +226,7 @@ func TestWriteFile_RenameFailure_ReportsRenamePhase(t *testing.T) {
 	if we.Phase != PhaseRename {
 		t.Errorf("WriteError.Phase = %v, want PhaseRename", we.Phase)
 	}
+	assertNoTempLeak(t, dir)
 }
 
 func TestWriteReader(t *testing.T) {

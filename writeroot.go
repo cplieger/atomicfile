@@ -22,6 +22,10 @@ import (
 // an *os.Root already confines every operation to its tree and rejects names
 // that escape it, so "a/../b" (which stays inside) is allowed while
 // "../escape" is refused by the Root itself when the operation runs.
+//
+// It accepts a name that cleans to "." because that is a legitimate DIRECTORY
+// name inside a root, which ProbeWritableInRoot takes. An operation that needs
+// name to be an ENTRY uses validateRootEntry.
 func validateRootName(name string) (string, error) {
 	if name == "" {
 		return "", ErrEmptyPath
@@ -33,6 +37,28 @@ func validateRootName(name string) (string, error) {
 		return "", fmt.Errorf("%w: not relative: %q", ErrUnsafePath, name)
 	}
 	return filepath.Clean(name), nil
+}
+
+// validateRootEntry is validateRootName for an operation that must name an ENTRY
+// inside root rather than a directory: it additionally refuses a name whose final
+// element is ".", ".." or the separator, none of which an operation can create,
+// rename onto or unlink.
+//
+// The refusal is shared so the two families answer the same input the same way.
+// Without it a write to "sub/.." staged a temp, wrote it, chmod'ed it, fsynced it
+// and closed it before failing at PhaseRename with "file exists" — a phase that
+// names the wrong step — while OpenParentInRoot refused the identical name with
+// ErrUnsafePath before touching the filesystem.
+func validateRootEntry(name string) (string, error) {
+	clean, err := validateRootName(name)
+	if err != nil {
+		return "", err
+	}
+	switch filepath.Base(clean) {
+	case ".", "..", string(filepath.Separator):
+		return "", fmt.Errorf("%w: names no entry: %q", ErrUnsafePath, name)
+	}
+	return clean, nil
 }
 
 // randomTempName returns a temp base name of the exact shape CleanupStaleTemps
@@ -95,12 +121,30 @@ func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
 	}
 }
 
-// checkSymlinkInRoot refuses a symlink target. A missing target is fine. The
-// eventual rename would replace the final name rather than follow it, so the
-// worst case under a racing attacker who plants a symlink is replacing that
-// link — and an *os.Root forbids the link from pointing outside the tree
-// regardless.
-func checkSymlinkInRoot(root *os.Root, name string) error {
+// checkWriteTargetInRoot refuses a target name already occupied by something an
+// atomic write must not replace. A missing target is fine — that is the ordinary
+// case.
+//
+// A symlink is refused with ErrSymlinkTarget. The rename would replace the link
+// rather than follow it, so the worst case under a racing attacker who plants one
+// is replacing that link, and an *os.Root forbids it pointing outside the tree
+// regardless; the refusal is still worth having, because a caller that wrote a
+// file and finds a link at its name has lost track of the path.
+//
+// Anything else that is not a REGULAR file is refused with ErrNotRegular, the
+// same verdict ReadBoundedInRoot gives what it will read and RemoveFileInRoot
+// gives what it will unlink. Measured before the refusal existed: a write whose
+// target was a FIFO SUCCEEDED and reported Durable, because rename(2) happily
+// replaces a pipe, a socket or a device node with a regular file — so a co-mounting
+// writer could get this package to destroy an object it never created. A directory
+// target failed instead, but only at PhaseRename, after a complete staged write
+// and both fsyncs, under a phase that named the wrong step.
+//
+// The check is a check-then-act and cannot be otherwise: rename(2) has no "only
+// if the destination is a regular file" mode. Its value is refusing the states
+// that are there to be found, not winning a race — and the race it can lose is
+// bounded by rename never following a final-component symlink.
+func checkWriteTargetInRoot(root *os.Root, name string) error {
 	fi, err := root.Lstat(name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -108,8 +152,11 @@ func checkSymlinkInRoot(root *os.Root, name string) error {
 		}
 		return fmt.Errorf("atomicfile: stat target %q: %w", name, err)
 	}
-	if fi.Mode()&os.ModeSymlink != 0 {
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
 		return fmt.Errorf("%w: %s", ErrSymlinkTarget, name)
+	case !fi.Mode().IsRegular():
+		return fmt.Errorf("%w: %s (type %s)", ErrNotRegular, name, fi.Mode().Type())
 	}
 	return nil
 }
@@ -280,24 +327,25 @@ type stagedTemp struct {
 }
 
 // openTempForRoot runs the pre-barrier preamble for every write: it validates
-// the relative name, honors ctx, refuses a symlink target, optionally creates
-// the parent directory chain, and creates the temp file inside root. It is the
-// single place that enforces the pre-write guard contract; add new pre-write
-// checks here. The guard sequence (nil-root -> validateRootName -> ctx ->
-// checkSymlinkInRoot -> mkdir -> createTempInRoot) must not be reordered.
+// the relative name, honors ctx, refuses a target already occupied by something
+// a write must not replace, optionally creates the parent directory chain, and
+// creates the temp file inside root. It is the single place that enforces the
+// pre-write guard contract; add new pre-write checks here. The guard sequence
+// (nil-root -> validateRootEntry -> ctx -> checkWriteTargetInRoot -> mkdir ->
+// createTempInRoot) must not be reordered.
 func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (stagedTemp, error) {
 	if root == nil {
 		return stagedTemp{}, fmt.Errorf("%w: nil root", ErrUnsafePath)
 	}
-	cleanName, err := validateRootName(name)
+	cleanName, err := validateRootEntry(name)
 	if err != nil {
 		return stagedTemp{}, err
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return stagedTemp{}, fmt.Errorf("atomicfile: %w", ctxErr)
 	}
-	if symErr := checkSymlinkInRoot(root, cleanName); symErr != nil {
-		return stagedTemp{}, symErr
+	if tgtErr := checkWriteTargetInRoot(root, cleanName); tgtErr != nil {
+		return stagedTemp{}, tgtErr
 	}
 	dir := filepath.Dir(cleanName)
 	dirSyncFailed := false
