@@ -1,7 +1,9 @@
 package atomicfile
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -102,36 +104,30 @@ func reapStaleTemp(dir string, e os.DirEntry, cutoff time.Time, logger *slog.Log
 	return true, false
 }
 
-// reapDir drains an open directory handle in batches, invoking
-// reapStaleTemp on each entry, and returns the count removed and the
-// count that failed. io.EOF is the normal terminal signal, not an
-// error; any other readdir error is returned.
-func reapDir(d *os.File, dir string, cutoff time.Time, logger *slog.Logger) (removed, failed int, err error) {
-	for {
-		entries, readErr := d.ReadDir(128)
-		for _, e := range entries {
-			didRemove, didFail := reapStaleTemp(dir, e, cutoff, logger)
-			if didRemove {
-				removed++
-			}
-			if didFail {
-				failed++
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			return removed, failed, nil
-		}
-		if readErr != nil {
-			return removed, failed, readErr
-		}
-	}
-}
-
 // CleanupStaleTemps removes temp files in dir that this package created
-// (".atomicfile-<digits>.tmp") and whose mtime is older than maxAge. It returns
-// the number removed. A missing dir is not an error. Best-effort per file:
-// individual stat/remove failures are logged at Debug and skipped (see
-// reapStaleTemp); only a readdir failure is returned.
+// (".atomicfile-<digits>.tmp") and whose mtime is older than maxAge, reporting
+// the per-outcome counts. A missing dir is not an error.
+//
+// It is the ambient-path sibling of CleanupStaleTempsInRoot and differs from it
+// in exactly one property: every path is built with filepath.Join and handed to
+// os.Lstat/os.Remove, which is safe for a directory the caller owns outright and
+// NOT safe for one a co-mounting writer can modify underneath. Reach for the
+// root-confined form there; reconstructing an ambient path and calling this
+// reintroduces precisely that TOCTOU window.
+//
+// Depth is opt-in through WithRecursive, identically for both, because a sweep
+// deletes files and how much of the filesystem it touches belongs at the call
+// site.
+//
+// Cancellation. The walk stops between entries once ctx is done, so a sweep of a
+// large tree cannot hold up shutdown, and an already-cancelled context does no
+// work. A cancelled sweep returns ctx.Err() alongside the counts accumulated so
+// far.
+//
+// Best-effort per file: an individual stat or remove failure is logged at Debug
+// and counted in SweepResult.Failed rather than returned, and a subdirectory that
+// cannot be entered is counted in Unreadable. Only a failure to read dir itself
+// is returned.
 //
 // # Choosing maxAge
 //
@@ -148,40 +144,64 @@ func reapDir(d *os.File, dir string, cutoff time.Time, logger *slog.Logger) (rem
 //
 // A non-positive maxAge skips the sweep with a Warn rather than reaping
 // everything, so a zero value from an unset config cannot empty a directory.
-func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (removed int, err error) {
+func CleanupStaleTemps(ctx context.Context, dir string, maxAge time.Duration, opts ...Option) (SweepResult, error) {
 	c := buildCfg(opts)
 	if maxAge <= 0 {
 		c.logger.Warn("atomicfile.CleanupStaleTemps: non-positive maxAge; skipping cleanup",
 			"dir", dir, "max_age", maxAge)
-		return 0, nil
+		return SweepResult{}, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return SweepResult{}, fmt.Errorf("atomicfile: %w", ctxErr)
 	}
 	d, rdErr := os.Open(dir)
 	if rdErr != nil {
 		if errors.Is(rdErr, fs.ErrNotExist) {
-			return 0, nil
+			return SweepResult{}, nil
 		}
-		return 0, rdErr
+		return SweepResult{}, rdErr
 	}
 	defer d.Close()
 
-	cutoff := time.Now().Add(-maxAge)
-	var failed int
+	s := &ambientSweep{ctx: ctx, cutoff: time.Now().Add(-maxAge), logger: c.logger}
+	var err error
 	if c.recursive {
-		removed, failed, err = reapTree(dir, cutoff, c.logger)
+		err = s.reapTree(dir)
 	} else {
-		removed, failed, err = reapDir(d, dir, cutoff, c.logger)
+		err = s.reapDir(d, dir)
 	}
-	if err != nil {
-		return removed, err
+	return s.result, err
+}
+
+// ambientSweep carries the mutable accounting of one CleanupStaleTemps walk, the
+// shape rootSweep already uses, so the callback is a named method rather than a
+// closure over four variables.
+type ambientSweep struct {
+	ctx    context.Context
+	logger *slog.Logger
+	cutoff time.Time
+	result SweepResult
+}
+
+// reapDir drains an open directory handle in batches, invoking reapStaleTemp on
+// each entry. io.EOF is the normal terminal signal, not an error; any other
+// readdir error is returned. A done context stops the sweep between batches.
+func (s *ambientSweep) reapDir(d *os.File, dir string) error {
+	for {
+		if ctxErr := s.ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("atomicfile: %w", ctxErr)
+		}
+		entries, readErr := d.ReadDir(128)
+		for _, e := range entries {
+			s.count(reapStaleTemp(dir, e, s.cutoff, s.logger))
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
 	}
-	if removed > 0 {
-		c.logger.Info("atomicfile.CleanupStaleTemps: removed stale temps", "dir", dir, "count", removed)
-	}
-	if failed > 0 {
-		c.logger.Warn("atomicfile.CleanupStaleTemps: some stale temps could not be removed",
-			"dir", dir, "failed", failed, "removed", removed)
-	}
-	return removed, nil
 }
 
 // reapTree is reapDir extended over subdirectories, for WithRecursive.
@@ -191,32 +211,38 @@ func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (remove
 // final target, and hand-rolling that walk beside a single-directory library call is what
 // leaves an orphan in a subdirectory nobody swept.
 //
-// A directory it cannot enter is counted as a failure and skipped rather than aborting
+// A directory it cannot enter is counted as Unreadable and skipped rather than aborting
 // the walk: a partial sweep is strictly better than none, and the count reaches the
-// caller's warning. Every path stays ambient here, matching this function's siblings —
-// a caller that needs the removals confined against a co-mounting writer wants
+// caller. Every path stays ambient here, matching this function's siblings — a caller
+// that needs the removals confined against a co-mounting writer wants
 // CleanupStaleTempsInRoot instead.
-func reapTree(dir string, cutoff time.Time, logger *slog.Logger) (removed, failed int, err error) {
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+func (s *ambientSweep) reapTree(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if ctxErr := s.ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if walkErr != nil {
 			if path == dir {
 				return walkErr
 			}
-			logger.Debug("atomicfile.CleanupStaleTemps: skipping unreadable path", "path", path, "error", walkErr)
-			failed++
+			s.logger.Debug("atomicfile.CleanupStaleTemps: skipping unreadable path", "path", path, "error", walkErr)
+			s.result.Unreadable++
 			return nil
 		}
 		if d.IsDir() {
 			return nil
 		}
-		didRemove, didFail := reapStaleTemp(filepath.Dir(path), d, cutoff, logger)
-		if didRemove {
-			removed++
-		}
-		if didFail {
-			failed++
-		}
+		s.count(reapStaleTemp(filepath.Dir(path), d, s.cutoff, s.logger))
 		return nil
 	})
-	return removed, failed, walkErr
+}
+
+// count folds one reapStaleTemp outcome into the running result.
+func (s *ambientSweep) count(didRemove, didFail bool) {
+	if didRemove {
+		s.result.Removed++
+	}
+	if didFail {
+		s.result.Failed++
+	}
 }

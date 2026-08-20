@@ -1,6 +1,8 @@
 package atomicfile
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/user"
@@ -31,11 +33,11 @@ func TestCleanupStaleTemps(t *testing.T) {
 			t.Fatalf("seed recent: %v", err)
 		}
 
-		removed, err := CleanupStaleTemps(dir, time.Hour)
+		removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps: %v", err)
 		}
-		if removed != 1 {
+		if removed.Removed != 1 {
 			t.Errorf("removed = %d, want 1", removed)
 		}
 		if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -48,11 +50,11 @@ func TestCleanupStaleTemps(t *testing.T) {
 
 	t.Run("missing_dir_is_not_an_error", func(t *testing.T) {
 		t.Parallel()
-		removed, err := CleanupStaleTemps(filepath.Join(t.TempDir(), "nope"), time.Hour)
+		removed, err := CleanupStaleTemps(t.Context(), filepath.Join(t.TempDir(), "nope"), time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps(missing) = %v, want nil", err)
 		}
-		if removed != 0 {
+		if removed.Removed != 0 {
 			t.Errorf("removed = %d, want 0", removed)
 		}
 	})
@@ -88,11 +90,11 @@ func TestCleanupStaleTemps(t *testing.T) {
 			t.Fatalf("Chtimes real temp: %v", err)
 		}
 
-		removed, err := CleanupStaleTemps(dir, time.Hour)
+		removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps: %v", err)
 		}
-		if removed != 1 {
+		if removed.Removed != 1 {
 			t.Errorf("removed = %d, want 1 (only the digit-suffixed temp)", removed)
 		}
 		for _, name := range spared {
@@ -113,11 +115,11 @@ func TestCleanupStaleTemps(t *testing.T) {
 			t.Fatalf("WriteFile: %v", err)
 		}
 		// A successful write leaves no temp, so nothing to reclaim.
-		removed, err := CleanupStaleTemps(dir, 0)
+		removed, err := CleanupStaleTemps(t.Context(), dir, 0)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps: %v", err)
 		}
-		if removed != 0 {
+		if removed.Removed != 0 {
 			t.Errorf("removed = %d, want 0 (no orphaned temps after a clean write)", removed)
 		}
 	})
@@ -139,7 +141,7 @@ func TestCleanupStaleTemps_readdir_error_does_not_panic(t *testing.T) {
 		t.Fatalf("Chmod error = %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	if _, err := CleanupStaleTemps(dir, time.Hour); err == nil {
+	if _, err := CleanupStaleTemps(t.Context(), dir, time.Hour); err == nil {
 		t.Error("CleanupStaleTemps(EACCES dir) = nil error, want readdir error")
 	}
 }
@@ -169,11 +171,11 @@ func TestCleanupStaleTemps_continues_after_remove_failure(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 	// A read-only dir blocks unlink; CleanupStaleTemps must not panic and must
 	// report zero removed since every remove fails.
-	removed, err := CleanupStaleTemps(dir, time.Hour)
+	removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 	if err != nil {
 		t.Fatalf("CleanupStaleTemps = %v, want nil (per-file failures are skipped)", err)
 	}
-	if removed != 0 {
+	if removed.Removed != 0 {
 		t.Errorf("removed = %d, want 0 (all removes blocked)", removed)
 	}
 	_ = os.Chmod(dir, 0o755)
@@ -184,7 +186,7 @@ func TestCleanupStaleTemps_continues_after_remove_failure(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleTemps_RemoveFailure_WarnsWithCount(t *testing.T) {
+func TestCleanupStaleTemps_RemoveFailure_CountsAsFailed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits drive unlink permission")
 	}
@@ -207,32 +209,25 @@ func TestCleanupStaleTemps_RemoveFailure_WarnsWithCount(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
+	// Two candidates the sweep cannot unlink: both reach the caller as Failed,
+	// which is the number that says "orphans are accumulating and I could not
+	// reclaim them". It used to be reachable only through a Warn attribute.
 	h := &captureHandler{}
-	removed, err := CleanupStaleTemps(dir, time.Hour, WithLogger(slog.New(h)))
+	got, err := CleanupStaleTemps(t.Context(), dir, time.Hour, WithLogger(slog.New(h)))
 	if err != nil {
-		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
+		t.Fatalf("CleanupStaleTemps = %v, want nil (per-file failures are counted, not returned)", err)
 	}
-	if removed != 0 {
-		t.Errorf("removed = %d, want 0", removed)
+	want := SweepResult{Failed: 2}
+	if got != want {
+		t.Errorf("SweepResult = %+v, want %+v", got, want)
 	}
-	var warnCount int
-	var failedAttr int64 = -1
-	for _, r := range h.Records() {
-		if r.Level == slog.LevelWarn {
-			warnCount++
-			r.Attrs(func(a slog.Attr) bool {
-				if a.Key == "failed" {
-					failedAttr = a.Value.Int64()
-				}
-				return true
-			})
-		}
+	// The per-entry Debug diagnostics stay: they carry which path and which errno,
+	// which the counts cannot.
+	if n := h.CountLevel(slog.LevelDebug); n != 2 {
+		t.Errorf("Debug record count = %d, want 2 (one per candidate)", n)
 	}
-	if warnCount != 1 {
-		t.Errorf("warn count = %d, want 1", warnCount)
-	}
-	if failedAttr != 2 {
-		t.Errorf("failed attr = %d, want 2", failedAttr)
+	if n := h.CountLevel(slog.LevelWarn); n != 0 {
+		t.Errorf("Warn record count = %d, want 0: SweepResult.Failed is the report", n)
 	}
 }
 
@@ -248,11 +243,11 @@ func TestCleanupStaleTemps_NonPositiveMaxAge_SparesOldTemp(t *testing.T) {
 		if err := os.Chtimes(stale, old, old); err != nil {
 			t.Fatalf("Chtimes: %v", err)
 		}
-		removed, err := CleanupStaleTemps(dir, maxAge)
+		removed, err := CleanupStaleTemps(t.Context(), dir, maxAge)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps(%v) = %v", maxAge, err)
 		}
-		if removed != 0 {
+		if removed.Removed != 0 {
 			t.Errorf("CleanupStaleTemps(maxAge=%v) removed = %d, want 0", maxAge, removed)
 		}
 		if _, err := os.Stat(stale); err != nil {
@@ -327,11 +322,11 @@ func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
 		t.Fatalf("Chtimes: %v", err)
 	}
 
-	removed, err := CleanupStaleTemps(dir, time.Hour)
+	removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 	if err != nil {
 		t.Fatalf("CleanupStaleTemps: %v", err)
 	}
-	if removed != 0 {
+	if removed.Removed != 0 {
 		t.Errorf("removed = %d, want 0 (a temp-named directory must never be reclaimed)", removed)
 	}
 	if fi, statErr := os.Stat(staleDir); statErr != nil || !fi.IsDir() {
@@ -339,9 +334,13 @@ func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
 	}
 }
 
-// With exactly one stale temp reclaimed and none failing, the Info "removed"
-// line fires once and the Warn "could not be removed" line never fires.
-func TestCleanupStaleTemps_RemovedTemps_LogsInfoNotWarn(t *testing.T) {
+// The sweep reports its outcome and does NOT narrate it. Both counts reach the
+// caller in a SweepResult, so an aggregate Info/Warn summary would say the same
+// thing in a second voice — the reason CleanupStaleTempsInRoot never had one, and
+// the reason this one lost the two lines it used to emit when its own return value
+// could not carry the numbers. Per-entry Debug diagnostics stay: those are details
+// the counts cannot carry.
+func TestCleanupStaleTemps_ReportsCountsWithoutNarratingThem(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	stale := filepath.Join(dir, ".atomicfile-123456.tmp")
@@ -354,42 +353,76 @@ func TestCleanupStaleTemps_RemovedTemps_LogsInfoNotWarn(t *testing.T) {
 	}
 	h := &captureHandler{}
 
-	removed, err := CleanupStaleTemps(dir, time.Hour, WithLogger(slog.New(h)))
+	got, err := CleanupStaleTemps(t.Context(), dir, time.Hour, WithLogger(slog.New(h)))
 	if err != nil {
 		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 	}
-	if removed != 1 {
-		t.Fatalf("removed = %d, want 1", removed)
+	want := SweepResult{Removed: 1}
+	if got != want {
+		t.Errorf("SweepResult = %+v, want %+v", got, want)
 	}
-	if got := h.CountLevelExact(slog.LevelInfo, msgStaleRemoved); got != 1 {
-		t.Errorf("Info %q count = %d, want 1 (removed=1 must log the summary)", msgStaleRemoved, got)
+	if n := h.CountLevelExact(slog.LevelInfo, msgStaleRemoved); n != 0 {
+		t.Errorf("Info %q count = %d, want 0: the counts are the report", msgStaleRemoved, n)
 	}
-	if got := h.CountLevelExact(slog.LevelWarn, msgStaleRemoveFail); got != 0 {
-		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
+	if n := h.CountLevelExact(slog.LevelWarn, msgStaleRemoveFail); n != 0 {
+		t.Errorf("Warn %q count = %d, want 0: the counts are the report", msgStaleRemoveFail, n)
 	}
 }
 
-// A run that reclaims nothing emits no summary logs.
-func TestCleanupStaleTemps_NothingRemoved_DoesNotLogInfo(t *testing.T) {
+// An unreadable subdirectory under WithRecursive reaches the caller as a count
+// rather than only as a log line. Before the SweepResult return there was nowhere
+// for this number to go, so a caller could not tell "swept clean" from "could not
+// look in half the tree".
+func TestCleanupStaleTemps_UnreadableSubdirectoryIsCounted(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a 0o000 directory")
+	}
 	t.Parallel()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "keep.json"), []byte("x"), 0o644); err != nil {
-		t.Fatalf("seed unrelated file: %v", err)
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatalf("Mkdir: %v", err)
 	}
-	h := &captureHandler{}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
-	removed, err := CleanupStaleTemps(dir, time.Hour, WithLogger(slog.New(h)))
+	got, err := CleanupStaleTemps(t.Context(), dir, time.Hour, WithRecursive(true))
 	if err != nil {
-		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
+		t.Fatalf("CleanupStaleTemps = %v, want nil (a partial sweep beats none)", err)
 	}
-	if removed != 0 {
-		t.Fatalf("removed = %d, want 0", removed)
+	if got.Unreadable != 1 {
+		t.Errorf("SweepResult.Unreadable = %d, want 1", got.Unreadable)
 	}
-	if got := h.CountLevelExact(slog.LevelInfo, msgStaleRemoved); got != 0 {
-		t.Errorf("Info %q count = %d, want 0 (removed=0 must not log the summary)", msgStaleRemoved, got)
+}
+
+// An already-cancelled context does no work, and a context cancelled mid-sweep
+// stops it, so a sweep of a large tree cannot hold up shutdown. The ambient sweep
+// had no cancellation at all before it took a context: a recursive
+// filepath.WalkDir over a large tree ran to completion regardless.
+func TestCleanupStaleTemps_HonorsContext(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	stale := filepath.Join(dir, ".atomicfile-123456.tmp")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed stale temp: %v", err)
 	}
-	if got := h.CountLevelExact(slog.LevelWarn, msgStaleRemoveFail); got != 0 {
-		t.Errorf("Warn %q count = %d, want 0 (failed=0 must not warn)", msgStaleRemoveFail, got)
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, recursive := range []bool{false, true} {
+		got, err := CleanupStaleTemps(ctx, dir, time.Hour, WithRecursive(recursive))
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("CleanupStaleTemps(cancelled, recursive=%v) = %v, want context.Canceled", recursive, err)
+		}
+		if got.Removed != 0 {
+			t.Errorf("Removed = %d on a cancelled sweep, want 0", got.Removed)
+		}
+	}
+	if _, statErr := os.Stat(stale); statErr != nil {
+		t.Errorf("Stat(stale) = %v; a cancelled sweep must remove nothing", statErr)
 	}
 }
 

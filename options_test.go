@@ -141,7 +141,7 @@ func TestOptions_NilElement(t *testing.T) {
 	})
 	t.Run("CleanupStaleTemps", func(t *testing.T) {
 		t.Parallel()
-		if _, err := CleanupStaleTemps(t.TempDir(), time.Hour, nil, nil); err != nil {
+		if _, err := CleanupStaleTemps(t.Context(), t.TempDir(), time.Hour, nil, nil); err != nil {
 			t.Fatalf("CleanupStaleTemps with nil option: %v", err)
 		}
 	})

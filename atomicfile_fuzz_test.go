@@ -380,7 +380,7 @@ func FuzzCleanupStaleTemps(f *testing.F) {
 			preSet[e.Name()] = true
 		}
 
-		removed, err := CleanupStaleTemps(dir, maxAge)
+		removed, err := CleanupStaleTemps(t.Context(), dir, maxAge)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps: %v", err)
 		}
@@ -402,7 +402,7 @@ func FuzzCleanupStaleTemps(f *testing.F) {
 				t.Fatalf("non-stale file %q was removed", name)
 			}
 		}
-		if gone != removed {
+		if gone != removed.Removed {
 			t.Fatalf("removed count = %d, but %d files disappeared", removed, gone)
 		}
 	})
