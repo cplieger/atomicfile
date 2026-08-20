@@ -233,7 +233,8 @@ func EnsurePrivateDir(dir string, opts ...Option) (PrivateDir, error) {
 		if !c.repairOwnedDir {
 			return PrivateDir{}, fmt.Errorf(
 				"%w: %s: mode %#o grants group or other access, and a pre-existing directory is never repaired without WithRepairOwnedDir(true)",
-				ErrModeTooOpen, clean, found)
+				ErrModeTooOpen, clean, found,
+			)
 		}
 		stored, repairErr := EnforceMode(f, privateDirMode)
 		if repairErr != nil {
