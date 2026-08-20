@@ -132,6 +132,22 @@ func reapDir(d *os.File, dir string, cutoff time.Time, logger *slog.Logger) (rem
 // the number removed. A missing dir is not an error. Best-effort per file:
 // individual stat/remove failures are logged at Debug and skipped (see
 // reapStaleTemp); only a readdir failure is returned.
+//
+// # Choosing maxAge
+//
+// maxAge must exceed the longest time any CONCURRENT writer may hold a temp,
+// because a sweep cannot tell an orphan from a write in progress — POSIX offers
+// no way to ask. The gate is the temp's mtime, not its creation time, so a
+// streaming write that keeps producing bytes keeps refreshing it and is safe at
+// any duration; what is at risk is a temp nothing has written to for maxAge. The
+// realistic case is a PendingFile: a caller that stages, then does slow work,
+// then Commits. _Measured_: with a temp backdated past a one-hour maxAge, the
+// sweep unlinked it and the subsequent Commit failed with
+// *WriteError{PhaseRename} wrapping ENOENT. No data is lost (the previous file at
+// the target is untouched) but that write is.
+//
+// A non-positive maxAge skips the sweep with a Warn rather than reaping
+// everything, so a zero value from an unset config cannot empty a directory.
 func CleanupStaleTemps(dir string, maxAge time.Duration, opts ...Option) (removed int, err error) {
 	c := buildCfg(opts)
 	if maxAge <= 0 {

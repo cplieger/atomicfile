@@ -28,6 +28,33 @@
 // whether a name is one, so the agreement is a contract a test can pin rather
 // than a convention rebuilt from os.CreateTemp's undocumented substitution.
 //
+// # Orphans, and who reclaims them
+//
+// A temp exists on disk between its creation and the rename that publishes it.
+// Each write removes its own temp on every failure path, but a deferred removal
+// only runs if the process lives to run it: SIGKILL does not, and neither does
+// Go's default SIGINT/SIGTERM handling, which exits without unwinding. A power
+// loss, an OOM kill, or a `docker stop` that escalates therefore leaves a temp
+// behind, and so does a PendingFile a caller abandons without Commit or Cleanup.
+// The atomicity guarantee is unaffected — nothing was published, and the previous
+// file at the target is untouched — so an orphan costs disk, not correctness.
+//
+// Nothing in this package reclaims them on its own. There is no background
+// sweeper, no finalizer, and no cleanup on the next write: reclamation is
+// CleanupStaleTemps (or CleanupStaleTempsInRoot), called by the consumer where it
+// knows a sweep is safe — at startup, or on a schedule. A finalizer was
+// considered and rejected: an unlink with no ordering guarantee against a live
+// Commit would make abandonment silently work sometimes, which is worse than
+// deterministically leaving a file a shape-matched sweep can identify.
+//
+// A publish-by-linkat over O_TMPFILE would leave no name to orphan at all, and
+// does not fit: linkat cannot replace an existing entry, so publishing over a
+// previous generation still needs a named temp and a rename.
+//
+// The one interaction to get right is maxAge, which both sweeps document: it has
+// to exceed the longest time any concurrent writer may hold a temp, or the sweep
+// unlinks a live one.
+//
 // # Path validation
 //
 // ValidatePath is the acceptance check the absolute-path entry points apply,
