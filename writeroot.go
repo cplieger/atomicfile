@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // validateRootName checks that name is a non-empty, relative, null-byte-free
@@ -117,13 +118,116 @@ func checkSymlinkInRoot(root *os.Root, name string) error {
 // crash. It is a package var so tests can inject a failure; a real directory
 // fsync is impractical to fail on a healthy filesystem. Production never
 // reassigns it.
+//
+// O_DIRECTORY, not root.Open, for the reason WalkDirInRoot records: root.Open
+// is a plain O_RDONLY openat, and a reader-less FIFO blocks that open(2)
+// indefinitely. Reaching this with a FIFO at dir needs a co-mounting writer to
+// have replaced the directory the rename just landed in, which is narrow — but
+// the cost of being wrong is a hung goroutine, and the flag is free.
+// O_NONBLOCK has no effect on a directory and covers the same hazard twice.
 var fsyncRootDir = func(root *os.Root, dir string) error {
-	d, err := root.Open(dir)
+	d, err := root.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// mkdirAllInRoot creates dir and every missing ancestor inside root at mode,
+// enforcing the mode on each directory it creates and fsyncing that directory's
+// PARENT so the new directory entry is durable rather than merely present.
+//
+// os.Root.MkdirAll creates the same chain, and reporting only success is exactly
+// why it is not enough here: a directory entry that has never been fsynced into
+// its own parent can vanish in a crash, taking every descendant with it —
+// including the file this write is about to fsync and rename. Fsyncing the file
+// and its immediate parent makes the file durable only when that parent already
+// existed; when the write created the parent too, the chain has to be made
+// durable level by level. Without this, Result.Durable was true for a write
+// whose whole path could disappear.
+//
+// The mode is ENFORCED, not requested, for the reason EnforceMode records: a
+// mode passed to mkdir(2) is narrowed by umask and can be widened by an
+// inheritable ACL, so WithMkdirMode(0o700) would otherwise be a suggestion in
+// the one package that spent a primitive establishing that it must not be. Only
+// directories THIS call created are touched — mkdir(2) gives a new directory to
+// its creator, so nothing else has ever held that name — and a pre-existing
+// directory is left exactly as found, matching EnsurePrivateDir's rule.
+//
+// durable is false when a created directory's parent could not be fsynced. That
+// degrades Result.Durable instead of failing the write, matching what the
+// commit-side barrier does with the identical failure: a filesystem that refuses
+// to fsync a directory must not make every WithMkdirMode write an error while
+// the same write into an existing directory succeeds.
+func mkdirAllInRoot(root *os.Root, dir string, mode os.FileMode, logger *slog.Logger) (durable bool, err error) {
+	if dir == "." {
+		return true, nil // root itself, nothing to create
+	}
+	durable = true
+	prefix := ""
+	for component := range strings.SplitSeq(dir, string(filepath.Separator)) {
+		prefix = filepath.Join(prefix, component)
+		created, levelErr := mkdirLevelInRoot(root, prefix, mode)
+		if levelErr != nil {
+			return false, levelErr
+		}
+		if !created {
+			continue
+		}
+		if syncErr := fsyncRootDir(root, filepath.Dir(prefix)); syncErr != nil {
+			logger.Warn("atomicfile: fsync of a created directory's parent failed; write is not durable",
+				"root", root.Name(), "dir", prefix, "error", syncErr)
+			durable = false
+		}
+	}
+	return durable, nil
+}
+
+// mkdirLevelInRoot creates one level of the chain inside root and reports whether
+// THIS call created it, which is what licenses the mode enforcement and asks for
+// the parent fsync. A level that already exists as a directory is left untouched.
+//
+// The ErrExist arm is os.MkdirAll's own tiebreak, kept so the error a caller sees
+// for a non-directory in the chain does not change: a Stat that resolves to a
+// directory is fine, one that resolves to anything else is ENOTDIR, and a Stat
+// that fails at all (a dangling or escaping symlink wearing the name) reports the
+// original ErrExist.
+func mkdirLevelInRoot(root *os.Root, prefix string, mode os.FileMode) (created bool, err error) {
+	mkErr := root.Mkdir(prefix, mode)
+	switch {
+	case mkErr == nil:
+		if enfErr := enforceDirMode(root, prefix, mode); enfErr != nil {
+			return false, enfErr
+		}
+		return true, nil
+	case errors.Is(mkErr, fs.ErrExist):
+		fi, statErr := root.Stat(prefix)
+		if statErr != nil {
+			return false, mkErr
+		}
+		if !fi.IsDir() {
+			return false, &fs.PathError{Op: "mkdir", Path: prefix, Err: syscall.ENOTDIR}
+		}
+		return false, nil
+	default:
+		return false, mkErr
+	}
+}
+
+// enforceDirMode opens a directory this process just created inside root and
+// proves the filesystem stored the mode that was asked for. O_DIRECTORY keeps
+// the handle on a directory and O_NONBLOCK keeps the open from parking on
+// anything else; EnforceMode then does fchmod and fstat on that one descriptor,
+// so no pathname is observed twice.
+func enforceDirMode(root *os.Root, dir string, mode os.FileMode) error {
+	d, err := root.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	_, err = EnforceMode(d, mode)
+	return err
 }
 
 // removeTempInRoot deletes a temp file best-effort, logging at Debug when
@@ -155,44 +259,70 @@ func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable
 	return true, nil
 }
 
+// stagedTemp is what the pre-barrier preamble produces: the open temp file plus
+// the names and the durability state the two barriers need in order to publish
+// it. It replaces five positional return values, four of which every caller
+// destructured identically.
+type stagedTemp struct {
+	// file is the open temp file, created owner-only and proved owner-only.
+	file *os.File
+	// name is the cleaned final name, relative to root.
+	name string
+	// dir is name's parent inside root, the commit-side dir-fsync target.
+	dir string
+	// tmpName is the temp file's name, relative to root.
+	tmpName string
+	// dirSyncFailed records that a directory this write CREATED could not be
+	// fsynced into its own parent, so the published file will be reachable but
+	// its path not yet durable. The zero value is the healthy one: a write that
+	// created no directory has nothing to make durable.
+	dirSyncFailed bool
+}
+
 // openTempForRoot runs the pre-barrier preamble for every write: it validates
 // the relative name, honors ctx, refuses a symlink target, optionally creates
-// the parent directory, and creates the temp file inside root. It is the
+// the parent directory chain, and creates the temp file inside root. It is the
 // single place that enforces the pre-write guard contract; add new pre-write
 // checks here. The guard sequence (nil-root -> validateRootName -> ctx ->
 // checkSymlinkInRoot -> mkdir -> createTempInRoot) must not be reordered.
-// On any error it returns zero values and the error; on success it returns the
-// open temp file plus the cleaned name, parent dir, and root-relative temp name.
-func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (tmp *os.File, cleanName, dir, tmpName string, err error) {
+func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (stagedTemp, error) {
 	if root == nil {
-		return nil, "", "", "", fmt.Errorf("%w: nil root", ErrUnsafePath)
+		return stagedTemp{}, fmt.Errorf("%w: nil root", ErrUnsafePath)
 	}
-	cleanName, err = validateRootName(name)
+	cleanName, err := validateRootName(name)
 	if err != nil {
-		return nil, "", "", "", err
+		return stagedTemp{}, err
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, "", "", "", fmt.Errorf("atomicfile: %w", ctxErr)
+		return stagedTemp{}, fmt.Errorf("atomicfile: %w", ctxErr)
 	}
 	if symErr := checkSymlinkInRoot(root, cleanName); symErr != nil {
-		return nil, "", "", "", symErr
+		return stagedTemp{}, symErr
 	}
-	dir = filepath.Dir(cleanName)
+	dir := filepath.Dir(cleanName)
+	dirSyncFailed := false
 	if c.mkdirMode != 0 {
-		if mkErr := root.MkdirAll(dir, c.mkdirMode); mkErr != nil {
-			return nil, "", "", "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
+		durable, mkErr := mkdirAllInRoot(root, dir, c.mkdirMode, c.logger)
+		if mkErr != nil {
+			return stagedTemp{}, fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
 		}
+		dirSyncFailed = !durable
 	}
-	tmp, tmpName, err = createTempInRoot(root, dir)
+	tmp, tmpName, err := createTempInRoot(root, dir)
 	if err != nil {
-		return nil, "", "", "", err
+		return stagedTemp{}, err
 	}
-	return tmp, cleanName, dir, tmpName, nil
+	return stagedTemp{
+		file:          tmp,
+		name:          cleanName,
+		dir:           dir,
+		tmpName:       tmpName,
+		dirSyncFailed: dirSyncFailed,
+	}, nil
 }
 
-// writeAtomicInRoot is the write engine: validate the relative name, honor
-// ctx, refuse symlink targets, optionally create the parent directory, create
-// the temp inside root, run the caller's writeData step, then hand off to the
+// writeAtomicInRoot is the write engine: run the pre-barrier preamble
+// (openTempForRoot), run the caller's writeData step, then hand off to the
 // temp-side barrier (finalizeTempFile) and the commit-side barrier
 // (commitTempInRoot). Every write entry point runs through it — the *InRoot
 // functions directly, the absolute-path functions via an *os.Root of the
@@ -200,29 +330,29 @@ func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (t
 // the *os.Root, so a symlink or ".." component can never cause a write outside
 // root's tree.
 func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, writeData func(*os.File) error) (Result, error) {
-	tmp, cleanName, dir, tmpName, err := openTempForRoot(ctx, root, name, c)
+	st, err := openTempForRoot(ctx, root, name, c)
 	if err != nil {
 		return Result{}, err
 	}
 	committed := false
 	defer func() {
 		if !committed {
-			removeTempInRoot(root, tmpName, c.logger)
+			removeTempInRoot(root, st.tmpName, c.logger)
 		}
 	}()
-	if wErr := writeData(tmp); wErr != nil {
-		tmp.Close()
+	if wErr := writeData(st.file); wErr != nil {
+		st.file.Close()
 		return Result{}, &WriteError{Phase: PhaseTempWrite, Err: wErr}
 	}
-	if fErr := finalizeTempFile(ctx, tmp, c); fErr != nil {
+	if fErr := finalizeTempFile(ctx, st.file, c); fErr != nil {
 		return Result{}, fErr
 	}
 	committed = true
-	durable, cErr := commitTempInRoot(root, tmpName, cleanName, dir, c)
+	durable, cErr := commitTempInRoot(root, st.tmpName, st.name, st.dir, c)
 	if cErr != nil {
 		return Result{}, cErr
 	}
-	return Result{Path: filepath.Join(root.Name(), cleanName), Durable: durable}, nil
+	return Result{Path: filepath.Join(root.Name(), st.name), Durable: durable && !st.dirSyncFailed}, nil
 }
 
 // WriteFileInRoot atomically writes data to name, a path relative to root, with

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Result reports the outcome of an atomic write that reached its final path.
@@ -19,10 +21,11 @@ type Result struct {
 	// was opened with a relative path.
 	Path string
 	// Durable reports whether the write is guaranteed to survive a crash:
-	// true only when the file and its parent directory were both fsynced.
-	// It is false when the parent-directory fsync failed after the rename —
-	// in that case the data is present at Path but may not survive an
-	// immediate power loss, and the fsync failure is logged at Warn.
+	// true only when the file and every directory its path depends on were
+	// fsynced — the file itself, its parent, and each parent this write
+	// CREATED under WithMkdirMode. It is false when any of those directory
+	// fsyncs failed: the data is present at Path but may not survive an
+	// immediate power loss, and the failure is logged at Warn.
 	Durable bool
 }
 
@@ -39,25 +42,108 @@ type Result struct {
 // The caller owns the returned root and must close it. The engine's
 // Result.Path (root.Name() joined with base) reproduces the cleaned absolute
 // path exactly, so the clean form is not returned separately.
-func openParentRoot(ctx context.Context, path string, c *cfg) (root *os.Root, base string, err error) {
+//
+// dirSyncFailed reports that a directory the mkdir step created could not be
+// fsynced into its own parent, which the engine folds into Result.Durable (see
+// mkdirAllInRoot).
+func openParentRoot(ctx context.Context, path string, c *cfg) (root *os.Root, base string, dirSyncFailed bool, err error) {
 	cleanPath, err := validateAbsClean(path)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, "", fmt.Errorf("atomicfile: %w", ctxErr)
+		return nil, "", false, fmt.Errorf("atomicfile: %w", ctxErr)
 	}
 	dir := filepath.Dir(cleanPath)
 	if c.mkdirMode != 0 {
-		if mkErr := os.MkdirAll(dir, c.mkdirMode); mkErr != nil {
-			return nil, "", fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
+		failed, mkErr := mkdirAllAbs(dir, c.mkdirMode, c.logger)
+		if mkErr != nil {
+			return nil, "", false, fmt.Errorf("atomicfile: create parent directory %q: %w", dir, mkErr)
 		}
+		dirSyncFailed = failed
 	}
 	root, err = os.OpenRoot(dir)
 	if err != nil {
-		return nil, "", &WriteError{Phase: PhaseTempCreate, Err: err}
+		return nil, "", false, &WriteError{Phase: PhaseTempCreate, Err: err}
 	}
-	return root, filepath.Base(cleanPath), nil
+	return root, filepath.Base(cleanPath), dirSyncFailed, nil
+}
+
+// mkdirAllAbs creates the absolute directory dir and every missing ancestor at
+// mode, running the creation inside an *os.Root opened on the deepest ancestor
+// that ALREADY exists.
+//
+// The root is not decoration: mkdirAllInRoot is where the per-level mode
+// enforcement and the per-level parent fsync live, and running the absolute-path
+// family through it is what keeps one implementation of both rather than a
+// second copy over ambient paths. os.MkdirAll cannot serve here at all, because
+// it reports only success and the durability fix needs to know which levels are
+// new.
+//
+// The confinement it adds over os.MkdirAll is real but narrow, and worth stating
+// precisely rather than overclaiming: ancestors that already existed when
+// deepestExistingDir ran are still resolved ambiently, symlinks included (which
+// is correct — /var/log being a link to /mnt/log is ordinary, and refusing it
+// would break callers). What the root covers is every level BELOW that point: a
+// name the walk found missing and that a racing writer then plants as an
+// escaping symlink is refused by the root instead of followed, where os.MkdirAll
+// would create the remainder wherever the link lands.
+//
+// dirSyncFailed mirrors mkdirAllInRoot's inverted durable: true when a created
+// directory's parent could not be fsynced.
+func mkdirAllAbs(dir string, mode os.FileMode, logger *slog.Logger) (dirSyncFailed bool, err error) {
+	base, rel, err := deepestExistingDir(dir)
+	if err != nil {
+		return false, err
+	}
+	if rel == "." {
+		return false, nil // dir already exists; nothing was created
+	}
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	durable, err := mkdirAllInRoot(root, rel, mode, logger)
+	return !durable, err
+}
+
+// deepestExistingDir splits the absolute, cleaned dir into the deepest ancestor
+// that already exists and the relative remainder still to be created. rel is "."
+// when dir itself exists. A non-directory on the way up is ENOTDIR, matching
+// what os.MkdirAll reports for the same shape.
+//
+// The walk is the one ambient path resolution the absolute-path family cannot
+// avoid: something has to name the starting point before a root can confine
+// anything. It is read-only — os.Stat and nothing else — and the directories it
+// hands back are re-resolved once by os.OpenRoot, after which every operation is
+// openat-relative.
+func deepestExistingDir(dir string) (base, rel string, err error) {
+	rel = "."
+	for cur := dir; ; {
+		fi, statErr := os.Stat(cur)
+		if statErr == nil {
+			if !fi.IsDir() {
+				return "", "", &fs.PathError{Op: "mkdir", Path: cur, Err: syscall.ENOTDIR}
+			}
+			return cur, rel, nil
+		}
+		if !errors.Is(statErr, fs.ErrNotExist) {
+			return "", "", statErr
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// The filesystem root does not exist, which cannot happen on a
+			// working system; report the stat rather than looping.
+			return "", "", statErr
+		}
+		if rel == "." {
+			rel = filepath.Base(cur)
+		} else {
+			rel = filepath.Join(filepath.Base(cur), rel)
+		}
+		cur = parent
+	}
 }
 
 // finalizeTempFile runs the temp-side durability barrier on an open temp file
@@ -117,13 +203,21 @@ func finalizeTempFile(ctx context.Context, tmp *os.File, c *cfg) error {
 // open the parent directory as an *os.Root, then run writeAtomicInRoot on the
 // base name. The engine's Result.Path (root.Name() joined with the base) is
 // exactly the cleaned absolute path, so no fixup is needed.
+//
+// A mkdir-side directory-fsync failure is folded into Result.Durable here
+// because the mkdir happened before the engine's own root existed.
 func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.File) error) (Result, error) {
-	root, base, err := openParentRoot(ctx, path, c)
+	root, base, dirSyncFailed, err := openParentRoot(ctx, path, c)
 	if err != nil {
 		return Result{}, err
 	}
 	defer root.Close()
-	return writeAtomicInRoot(ctx, root, base, c, writeData)
+	res, err := writeAtomicInRoot(ctx, root, base, c, writeData)
+	if err != nil {
+		return Result{}, err
+	}
+	res.Durable = res.Durable && !dirSyncFailed
+	return res, nil
 }
 
 // WriteFile atomically writes data to path. Mode defaults to 0o644 (override
@@ -296,27 +390,32 @@ type PendingFile struct {
 	limit   int64 // WithMaxBytes cap; <= 0 means uncapped
 	written int64 // bytes staged under the append-stream model; see BytesWritten
 	ownRoot bool  // NewPendingFile opened root and must close it at a terminal state
-	state   pendingState
+	// dirSyncFailed records that a directory this write CREATED could not be
+	// fsynced into its own parent, so Commit reports Durable=false even when the
+	// commit-side directory fsync succeeds. See mkdirAllInRoot.
+	dirSyncFailed bool
+	state         pendingState
 }
 
 // newPendingFromRoot creates the staged temp inside root via the engine
 // preamble and assembles the PendingFile. ownRoot records whether the
 // PendingFile must close root when it reaches a terminal state.
 func newPendingFromRoot(ctx context.Context, root *os.Root, name string, ownRoot bool, c *cfg) (*PendingFile, error) {
-	tmp, cleanName, dir, tmpName, err := openTempForRoot(ctx, root, name, c)
+	st, err := openTempForRoot(ctx, root, name, c)
 	if err != nil {
 		return nil, err
 	}
 	return &PendingFile{
-		File:    tmp,
-		cfg:     c,
-		root:    root,
-		path:    filepath.Join(root.Name(), cleanName),
-		name:    cleanName,
-		dir:     dir,
-		tmpName: tmpName,
-		limit:   c.maxBytes,
-		ownRoot: ownRoot,
+		File:          st.file,
+		cfg:           c,
+		root:          root,
+		path:          filepath.Join(root.Name(), st.name),
+		name:          st.name,
+		dir:           st.dir,
+		tmpName:       st.tmpName,
+		limit:         c.maxBytes,
+		ownRoot:       ownRoot,
+		dirSyncFailed: st.dirSyncFailed,
 	}, nil
 }
 
@@ -325,7 +424,7 @@ func newPendingFromRoot(ctx context.Context, root *os.Root, name string, ownRoot
 // 0o644 (override with WithMode). ctx is checked before the temp is created.
 func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingFile, error) {
 	c := buildCfg(opts)
-	root, base, err := openParentRoot(ctx, path, c)
+	root, base, dirSyncFailed, err := openParentRoot(ctx, path, c)
 	if err != nil {
 		return nil, err
 	}
@@ -334,6 +433,9 @@ func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingF
 		root.Close()
 		return nil, err
 	}
+	// The mkdir ran before this PendingFile's own root existed, so its
+	// durability verdict is folded in here rather than inside the preamble.
+	pf.dirSyncFailed = pf.dirSyncFailed || dirSyncFailed
 	return pf, nil
 }
 
@@ -468,7 +570,7 @@ func (p *PendingFile) commit(ctx context.Context) (Result, error) {
 	if cErr != nil {
 		return Result{}, cErr
 	}
-	return Result{Path: p.path, Durable: durable}, nil
+	return Result{Path: p.path, Durable: durable && !p.dirSyncFailed}, nil
 }
 
 // Cleanup closes and removes the temp file, aborting the pending write. It is a
