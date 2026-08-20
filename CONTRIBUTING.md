@@ -13,7 +13,8 @@ ordering is the load-bearing invariant of the package:
 1. create a temp file in the **target directory** (same mount, so the
    rename is atomic),
 2. write the data,
-3. `Chmod` to the resolved mode,
+3. `EnforceMode` the resolved mode on the open handle (chmod, then re-stat
+   the same descriptor to prove the filesystem stored it),
 4. `fsync` the temp file,
 5. `close` then `os.Rename` to the final path,
 6. `fsync` the parent directory.
@@ -43,7 +44,10 @@ preserve this ordering. In particular:
   package-level writers, and `validateRootName` (relative, no null
   bytes; an internal `..` that stays inside the tree is allowed, since
   the `*os.Root` itself refuses any escape) for the `*os.Root`-confined
-  writers.
+  writers. A write names an ENTRY, so it goes through `validateRootEntry`,
+  which also refuses a name whose final element is `.` or `..`. Plain
+  `validateRootName` is for an operation that can name a directory, for example
+  `ProbeWritableInRoot`.
 
 The platform target is **Linux only**: `os.Rename` is not guaranteed
 atomic on Windows. Don't add Windows-specific rename code; see the
@@ -94,7 +98,7 @@ golangci-lint fmt
 
 ### Fuzzing
 
-The package ships nine fuzz targets in `atomicfile_fuzz_test.go`. Run one at a
+The package ships ten fuzz targets in `atomicfile_fuzz_test.go`. Run one at a
 time with a time budget:
 
 ```sh
@@ -106,7 +110,7 @@ Available targets:
 - `FuzzWriteFile`, `FuzzWriteReader`, `FuzzReadBounded`,
   `FuzzValidateAbsClean`, `FuzzValidateRootName`
 - `FuzzIsStaleTempName`, `FuzzPendingFileRoundTrip`,
-  `FuzzCleanupStaleTemps`, `FuzzWriteFileInRoot`
+  `FuzzCleanupStaleTemps`, `FuzzWriteFileInRoot`, `FuzzProbeWritable`
 
 New parsing or path-handling logic should come with a fuzz target or an
 added seed corpus entry.
