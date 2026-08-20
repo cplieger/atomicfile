@@ -308,12 +308,12 @@ func TestSweepDepthIsOptIn(t *testing.T) {
 		t.Parallel()
 		dir, top, nested := setup(t)
 
-		removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour)
+		removed, err := atomicfile.CleanupStaleTemps(t.Context(), dir, time.Hour)
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 		}
-		if removed != 1 {
-			t.Errorf("removed = %d, want 1", removed)
+		if removed.Removed != 1 {
+			t.Errorf("Removed = %d, want 1", removed.Removed)
 		}
 		assertGone(t, top)
 		assertPresent(t, nested, "a nested orphan must survive a flat sweep")
@@ -323,12 +323,12 @@ func TestSweepDepthIsOptIn(t *testing.T) {
 		t.Parallel()
 		dir, top, nested := setup(t)
 
-		removed, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive(true))
+		removed, err := atomicfile.CleanupStaleTemps(t.Context(), dir, time.Hour, atomicfile.WithRecursive(true))
 		if err != nil {
 			t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 		}
-		if removed != 2 {
-			t.Errorf("removed = %d, want 2 (both levels)", removed)
+		if removed.Removed != 2 {
+			t.Errorf("Removed = %d, want 2 (both levels)", removed.Removed)
 		}
 		assertGone(t, top)
 		assertGone(t, nested)
@@ -346,7 +346,7 @@ func TestSweepDepthIsOptIn(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := atomicfile.CleanupStaleTemps(dir, time.Hour, atomicfile.WithRecursive(true)); err != nil {
+		if _, err := atomicfile.CleanupStaleTemps(t.Context(), dir, time.Hour, atomicfile.WithRecursive(true)); err != nil {
 			t.Fatalf("CleanupStaleTemps = %v, want nil", err)
 		}
 		assertPresent(t, keep, "only this package's own temp shape is ever a candidate")

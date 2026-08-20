@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// SweepResult is the per-outcome accounting of one CleanupStaleTempsInRoot walk.
+// SweepResult is the per-outcome accounting of one stale-temp sweep, returned by
+// both CleanupStaleTemps and CleanupStaleTempsInRoot.
 //
 // Failed and Unreadable are separate because they are different operator problems.
 // Failed means a temp was found and could not be reclaimed (permissions on the file,
@@ -29,9 +30,10 @@ type SweepResult struct {
 // write, confined to root's tree.
 //
 // It sweeps ONE directory by default, exactly as CleanupStaleTemps does; pass
-// WithRecursive(true) to descend. The two functions differ only in the properties named
-// below, never in how much of the filesystem they touch — that is the caller's
-// explicit choice for both, because the operation deletes files.
+// WithRecursive(true) to descend. The two functions have the same signature shape and
+// the same outcome model, and differ in exactly one property — confinement, named
+// below. Neither differs in how much of the filesystem it touches: that is the
+// caller's explicit choice for both, because the operation deletes files.
 //
 // Confinement. Every stat and unlink goes through the *os.Root, so a symlink planted
 // under the swept tree cannot redirect a removal outside it, and each candidate is
@@ -51,11 +53,11 @@ type SweepResult struct {
 // large tree cannot hold up shutdown, and an already-cancelled context does no work.
 // A cancelled sweep returns ctx.Err() alongside the counts accumulated so far.
 //
-// Unlike CleanupStaleTemps this reports counts instead of logging aggregates: it
-// returns every number a caller needs to narrate the outcome itself, so emitting its
-// own summary would only duplicate that in a second voice. Per-entry diagnostics
-// (which path, which errno) still go to the configured logger at Debug, since those
-// are details the counts cannot carry.
+// Both sweeps report counts instead of logging aggregates: the SweepResult carries
+// every number a caller needs to narrate the outcome itself, so a summary line here
+// would only duplicate that in a second voice. Per-entry diagnostics (which path,
+// which errno) still go to the configured logger at Debug, since those are details
+// the counts cannot carry.
 //
 // maxAge must be positive; a non-positive value skips the sweep with a warning
 // rather than reaping everything. It must also exceed the longest time any

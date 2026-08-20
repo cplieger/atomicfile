@@ -51,11 +51,11 @@ func TestIsPackageTemp(t *testing.T) {
 			if err := os.Chtimes(path, old, old); err != nil {
 				t.Fatalf("Chtimes %q: %v", path, err)
 			}
-			removed, err := CleanupStaleTemps(dir, time.Hour)
+			removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 			if err != nil {
 				t.Fatalf("CleanupStaleTemps: %v", err)
 			}
-			if (removed == 1) != want {
+			if (removed.Removed == 1) != want {
 				t.Errorf("CleanupStaleTemps removed %d files named %q, but IsPackageTemp says %v",
 					removed, name, want)
 			}
@@ -107,11 +107,11 @@ func TestTempNameIsSweptForReal(t *testing.T) {
 		}
 	}
 
-	removed, err := CleanupStaleTemps(dir, time.Hour)
+	removed, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
 	if err != nil {
 		t.Fatalf("CleanupStaleTemps: %v", err)
 	}
-	if removed != files {
+	if removed.Removed != files {
 		t.Errorf("removed = %d, want %d", removed, files)
 	}
 	assertNoTempLeak(t, dir)

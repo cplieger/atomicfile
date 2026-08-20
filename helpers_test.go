@@ -21,6 +21,11 @@ func isWindows() bool { return runtime.GOOS == "windows" }
 
 // Log messages asserted by the best-effort logging tests; sharing the literals
 // keeps the tests in lockstep with the production strings they pin.
+//
+// msgStaleRemoved and msgStaleRemoveFail are the two aggregate lines
+// CleanupStaleTemps used to emit before it returned a SweepResult. They are kept
+// deliberately: the test that pins their ABSENCE needs the exact strings, and a
+// regression that re-adds either line would otherwise pass.
 const (
 	msgRemoveTempFailed = "atomicfile: temp file cleanup failed"
 	msgStaleRemoved     = "atomicfile.CleanupStaleTemps: removed stale temps"
@@ -218,6 +223,20 @@ func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
 	n := 0
 	for _, r := range h.Records() {
 		if r.Level == level && r.Message == message {
+			n++
+		}
+	}
+	return n
+}
+
+// CountLevel returns how many captured records were emitted at level,
+// regardless of message. It is the matcher for an assertion about a level's
+// PRESENCE or ABSENCE as a whole — "no aggregate Warn at all" — where naming a
+// message would let a reworded or newly added line slip through.
+func (h *captureHandler) CountLevel(level slog.Level) int {
+	n := 0
+	for _, r := range h.Records() {
+		if r.Level == level {
 			n++
 		}
 	}

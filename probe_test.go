@@ -598,11 +598,11 @@ func TestProbeLeakIsReclaimable(t *testing.T) {
 		if !IsPackageTemp(res.Name) {
 			t.Fatalf("IsPackageTemp(%q) = false; the probe named a file no sweep reclaims", res.Name)
 		}
-		removed, sweepErr := CleanupStaleTemps(dir, time.Hour)
+		removed, sweepErr := CleanupStaleTemps(t.Context(), dir, time.Hour)
 		if sweepErr != nil {
 			t.Fatalf("CleanupStaleTemps: %v", sweepErr)
 		}
-		if removed != 1 {
+		if removed.Removed != 1 {
 			t.Errorf("removed = %d, want 1", removed)
 		}
 		if _, statErr := os.Stat(leaked); !errors.Is(statErr, fs.ErrNotExist) {

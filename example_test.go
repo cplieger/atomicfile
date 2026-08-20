@@ -66,8 +66,8 @@ func ExampleCleanupStaleTemps() {
 	old := time.Now().Add(-2 * time.Hour)
 	_ = os.Chtimes(stale, old, old)
 
-	removed, _ := atomicfile.CleanupStaleTemps(dir, time.Hour)
-	fmt.Println(removed)
+	res, _ := atomicfile.CleanupStaleTemps(context.Background(), dir, time.Hour)
+	fmt.Println(res.Removed)
 	// Output: 1
 }
 
@@ -243,8 +243,8 @@ func ExampleTempName() {
 	old := time.Now().Add(-2 * time.Hour)
 	_ = os.Chtimes(path, old, old)
 
-	removed, _ := atomicfile.CleanupStaleTemps(dir, time.Hour)
-	fmt.Println(atomicfile.IsPackageTemp(filepath.Base(path)), removed)
+	res, _ := atomicfile.CleanupStaleTemps(context.Background(), dir, time.Hour)
+	fmt.Println(atomicfile.IsPackageTemp(filepath.Base(path)), res.Removed)
 	// Output: true 1
 }
 
