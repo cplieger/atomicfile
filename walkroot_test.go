@@ -213,6 +213,98 @@ func TestWalkDirInRoot_reports_an_unreadable_directory_and_continues(t *testing.
 	}
 }
 
+// twoSubdirTree builds a root holding two subdirectories, the second with one file in it,
+// so a walk that loses the first must still be able to reach the second. It returns the
+// root and the ambient path of the subdirectory a test is expected to remove.
+func twoSubdirTree(t *testing.T) (root *os.Root, doomed string) {
+	t.Helper()
+	root, dir := openTestRoot(t)
+	for _, sub := range []string{"a-dir", "b-dir"} {
+		if err := os.Mkdir(filepath.Join(dir, sub), 0o750); err != nil {
+			t.Fatalf("setup: Mkdir(%s) = %v, want nil", sub, err)
+		}
+	}
+	inside := filepath.Join(dir, "b-dir", "inside")
+	if err := os.WriteFile(inside, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: WriteFile(%s) = %v, want nil", inside, err)
+	}
+	return root, filepath.Join(dir, "a-dir")
+}
+
+// TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk pins the same
+// two-level error contract as the test above, through a failure the walk cannot avoid: a
+// subdirectory is queued by NAME and opened only after its parent's handle is closed, so
+// one removed in that window is reported through the callback for ITS OWN path, and a
+// callback that answers nil keeps the rest of the tree running.
+//
+// It is the witness that holds whatever UID the suite runs as. The permission fixture
+// above is skipped for root, which is what every container in this fleet runs as, so
+// without this the contract is unguarded exactly where it is measured. A directory that
+// disappears underneath the walk is also the likelier production shape: a co-mounting
+// writer reorganizing a tree while a sweep enumerates it.
+func TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk(t *testing.T) {
+	t.Parallel()
+	root, doomed := twoSubdirTree(t)
+
+	var got collectWalk
+	err := WalkDirInRoot(t.Context(), root, func(rel string, d fs.DirEntry, walkErr error) error {
+		if visitErr := got.visit(rel, d, walkErr); visitErr != nil {
+			return visitErr
+		}
+		if rel == "a-dir" && walkErr == nil {
+			if rmErr := os.Remove(doomed); rmErr != nil {
+				t.Errorf("remove %q between its readdir and its open = %v, want nil", doomed, rmErr)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WalkDirInRoot(subdirectory removed mid-walk) = %v, want nil: the callback answered"+
+			" nil, so the walk owns the rest of the tree", err)
+	}
+	if len(got.failed) != 1 || got.failed[0] != "a-dir" {
+		t.Errorf("WalkDirInRoot reported failures %v, want exactly [\"a-dir\"]", got.failed)
+	}
+	if !got.has(filepath.Join("b-dir", "inside")) {
+		t.Errorf("WalkDirInRoot visited %v after a sub-path it could not enter, want the rest of the"+
+			" tree too: a partial enumeration is what the callback asked for by answering nil", got.visited)
+	}
+}
+
+// TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure pins the other
+// half of that same decision. Whether an unenterable sub-path is fatal belongs to the
+// callback, so an error returned from the failure report ends the walk and reaches the
+// caller unchanged — a caller that treats a missed directory as fatal must not be handed
+// a nil error and a partial enumeration it cannot tell from a complete one.
+func TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure(t *testing.T) {
+	t.Parallel()
+	root, doomed := twoSubdirTree(t)
+	sentinel := errors.New("this sub-path is not optional")
+
+	var got collectWalk
+	err := WalkDirInRoot(t.Context(), root, func(rel string, d fs.DirEntry, walkErr error) error {
+		if visitErr := got.visit(rel, d, walkErr); visitErr != nil {
+			return visitErr
+		}
+		if walkErr != nil {
+			return sentinel
+		}
+		if rel == "a-dir" {
+			if rmErr := os.Remove(doomed); rmErr != nil {
+				t.Errorf("remove %q between its readdir and its open = %v, want nil", doomed, rmErr)
+			}
+		}
+		return nil
+	})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("WalkDirInRoot(callback refused a directory failure) = %v, want the callback's own error", err)
+	}
+	if got.has(filepath.Join("b-dir", "inside")) {
+		t.Errorf("WalkDirInRoot visited %v after the callback refused the failure, want the walk"+
+			" stopped there", got.visited)
+	}
+}
+
 // TestWalkDirInRoot_honours_the_walk_sentinels pins that fs.SkipDir and fs.SkipAll mean
 // what they mean in fs.WalkDir. The callback type IS fs.WalkDirFunc, so a caller reusing
 // a visitor written for fs.WalkDir must not have its sentinel silently treated as a

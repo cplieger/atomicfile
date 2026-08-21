@@ -3,6 +3,7 @@ package atomicfile
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/user"
@@ -123,6 +124,42 @@ func TestCleanupStaleTemps(t *testing.T) {
 			t.Errorf("removed = %d, want 0 (no orphaned temps after a clean write)", removed)
 		}
 	})
+}
+
+// TestCleanupStaleTemps_reaps_past_the_first_read_batch pins the property the batched
+// readdir exists for: the sweep drains a directory a batch at a time so a directory
+// holding thousands of orphans is never materialized whole, and that only helps if the
+// drain keeps going until the directory is exhausted.
+//
+// A drain that stopped after its first batch is the worst shape this function can take,
+// because nothing outside it can tell: the count it returns is the count it did, so a
+// caller watching SweepResult.Removed sees a healthy number every run while orphans
+// accumulate behind the batch boundary. Only a directory bigger than one batch shows it.
+func TestCleanupStaleTemps_reaps_past_the_first_read_batch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// More than the 128 entries one ReadDir call takes, so the drain has to span
+	// at least two of them.
+	const orphans = 165
+	old := time.Now().Add(-2 * time.Hour)
+	for i := range orphans {
+		p := filepath.Join(dir, fmt.Sprintf(".atomicfile-%06d.tmp", i))
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %q = %v, want nil", p, err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("Chtimes %q = %v, want nil", p, err)
+		}
+	}
+
+	got, err := CleanupStaleTemps(t.Context(), dir, time.Hour)
+	if err != nil {
+		t.Fatalf("CleanupStaleTemps = %v, want nil", err)
+	}
+	want := SweepResult{Removed: orphans}
+	if got != want {
+		t.Errorf("CleanupStaleTemps(dir holding %d stale temps) = %+v, want %+v", orphans, got, want)
+	}
 }
 
 func TestCleanupStaleTemps_readdir_error_does_not_panic(t *testing.T) {
