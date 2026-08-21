@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -176,6 +177,36 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 		t.Fatalf("unexpected len=%d", len(got))
 	}
 	assertNoTempLeak(t, dir)
+}
+
+// TestPendingFile_CleanupLogsNothingWhenNothingFails pins that the pending file's two
+// best-effort teardown diagnostics are failure-only. Cleanup cannot return either failure
+// — the temp's close and, for a PendingFile that opened its own parent root, that root's
+// close, both of which happen after the caller's last decision point — so each one is
+// reported at Debug instead.
+//
+// A line emitted on the SUCCESS path inverts what the line means: a caller running at
+// Debug then reads "close failed" once per clean write it makes, and the record that was
+// meant to name a real leak becomes the one nobody looks at.
+func TestPendingFile_CleanupLogsNothingWhenNothingFails(t *testing.T) {
+	t.Parallel()
+	h := &captureHandler{}
+	pf, err := NewPendingFile(t.Context(), filepath.Join(t.TempDir(), "pf.txt"), WithLogger(slog.New(h)))
+	if err != nil {
+		t.Fatalf("NewPendingFile: %v", err)
+	}
+	if _, err := pf.Write([]byte("staged")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if err := pf.Cleanup(); err != nil {
+		t.Fatalf("Cleanup of a healthy pending file = %v, want nil", err)
+	}
+
+	if n := h.CountLevel(slog.LevelDebug); n != 0 {
+		t.Errorf("Cleanup of a healthy pending file emitted %d Debug record(s), want 0:"+
+			" the teardown diagnostics report failures only", n)
+	}
 }
 
 func TestNewPendingFile_ContextCancel_NoTempLeak(t *testing.T) {

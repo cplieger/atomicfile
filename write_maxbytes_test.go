@@ -115,6 +115,28 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 	requireIntactTarget(t, path, "abcd")
 }
 
+// TestWriteReaderMaxBytesReportsTheProjectedSize pins what the streaming cap's refusal
+// has to tell the caller: the size the file would have REACHED, not the size of the chunk
+// that crossed the line. The chunk is refused whole, so the caller's next question is
+// always "by how much am I over", and only the projected total answers it — a 4-byte
+// chunk refused against a 6-byte cap says nothing on its own about how full the file
+// already was.
+func TestWriteReaderMaxBytesReportsTheProjectedSize(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "f.txt")
+	// Two 4-byte chunks against a 6-byte cap: the first is accepted, so the second is
+	// refused with 4 bytes already staged behind it.
+	chunked := io.MultiReader(strings.NewReader("abcd"), strings.NewReader("efgh"))
+
+	_, err := WriteReader(t.Context(), path, chunked, WithMaxBytes(6))
+	if !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("WriteReader(two 4-byte chunks, cap 6) = %v, want ErrFileTooLarge", err)
+	}
+	if want := "would grow the file to 8 bytes (max 6)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("WriteReader(two 4-byte chunks, cap 6) error = %q, want it to contain %q", err, want)
+	}
+}
+
 // neverEnding is an infinite reader of one repeated byte, chunked at the
 // buffer io.Copy hands it.
 type neverEnding byte
@@ -166,6 +188,12 @@ func TestPendingFileMaxBytesRejectsWholeWrite(t *testing.T) {
 	n, err := pf.Write([]byte("6789X"))
 	if n != 0 || !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("crossing write = (%d, %v), want (0, ErrFileTooLarge)", n, err)
+	}
+	// The refusal reports the size the file would have REACHED — 5 already staged
+	// plus the 5 refused — because that is the number a caller needs to size its
+	// payload down to, and the chunk size alone does not carry it.
+	if want := "would grow the staged file to 10 bytes (max 8)"; !strings.Contains(err.Error(), want) {
+		t.Errorf("crossing write error = %q, want it to contain %q", err, want)
 	}
 	if got := pf.BytesWritten(); got != 5 {
 		t.Errorf("BytesWritten = %d, want 5 (rejected write must not advance the count)", got)
@@ -300,6 +328,14 @@ func TestPendingFileUncappedTracksBytes(t *testing.T) {
 	}
 	if got := pf.BytesWritten(); got != 8 {
 		t.Errorf("BytesWritten = %d, want 8", got)
+	}
+	// An uncapped file truncates freely: the cap check has to mean "there is a cap AND
+	// this size exceeds it", so a file that never asked for one is never refused.
+	if err := pf.Truncate(5); err != nil {
+		t.Fatalf("Truncate(5) on an uncapped pending file = %v, want nil", err)
+	}
+	if got := pf.BytesWritten(); got != 5 {
+		t.Errorf("BytesWritten after Truncate(5) = %d, want 5 (accounting re-synced)", got)
 	}
 }
 
