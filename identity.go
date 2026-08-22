@@ -14,8 +14,10 @@ import (
 // change a file's content, and each defeats one half of the naive check:
 //
 //   - An IN-PLACE writer (a plain os.WriteFile, an editor, a truncate-and-write)
-//     keeps the same inode and moves the mtime forward. Comparing identity
-//     alone would call that unchanged.
+//     keeps the same inode and USUALLY moves the mtime forward — usually,
+//     because inode times come from a coarse clock tick, so two writes inside
+//     one tick carry byte-identical mtimes. Comparing identity alone would
+//     call that unchanged.
 //   - A PUBLISH-BY-RENAME writer — every write in this package — installs a
 //     DIFFERENT inode. Normally its mtime differs too, but it need not: a
 //     backup restore, an rsync with -t, a tar extract with -p, or any
@@ -24,10 +26,15 @@ import (
 //     stale copy would then be served until something else happened to touch
 //     the file.
 //
-// So the test is mtime equality AND os.SameFile identity, and both legs are
-// load-bearing. Size is not part of it: a same-size replacement is exactly the
-// case a size comparison misses, and a differing size is already covered by
-// one of the two legs.
+// So Matches compares mtime equality AND os.SameFile identity, and both legs
+// are load-bearing. Size is a THIRD leg, which this type does not hold and
+// which is not redundant: it is what catches an in-place rewrite that changed
+// the file's LENGTH without advancing its mtime, and neither leg above sees
+// that. mtime AND SameFile AND size strictly dominates either two-leg form, so
+// a caller whose file may be rewritten in place keeps its own size comparison
+// beside Changed, while one reading a file only this package publishes needs no
+// third leg. Nothing stat-based catches an in-place rewrite of equal length
+// inside one tick.
 //
 // The zero value records nothing, which reports Changed — the fail direction a
 // cache wants, since a spurious reload costs one read while a missed reload
