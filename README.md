@@ -190,7 +190,7 @@ The probe file is named with `TempName()`, so a probe orphaned by a crash (or le
 
 ## Reload staleness
 
-A process that caches a file written by someone else needs to know, from a stat alone, whether its in-memory copy is still current. The correct test is **mtime equality AND `os.SameFile` identity**, and it is knowledge about this package's write barrier, which is why the primitive lives here:
+A process that caches a file written by someone else needs to know, from a stat alone, whether its in-memory copy is still current. The test for a file published by rename is **mtime equality AND `os.SameFile` identity**, and it is knowledge about this package's write barrier, which is why the primitive lives here:
 
 ```go
 // after loading
@@ -206,10 +206,20 @@ if id.Changed(info) {
 
 Both legs are load-bearing, because two different write mechanisms change a file's content and each defeats one half of the naive check:
 
-- An **in-place** writer (`os.WriteFile`, an editor, truncate-and-write) keeps the same inode and moves the mtime forward. An identity-only check calls that unchanged.
+- An **in-place** writer (`os.WriteFile`, an editor, truncate-and-write) keeps the same inode and _usually_ moves the mtime forward — usually, because inode times come from a coarse clock tick, so two writes inside one tick carry byte-identical mtimes. An identity-only check calls that unchanged.
 - A **publish-by-rename** writer (every write in this package) installs a _different_ inode. Normally its mtime differs too, but it need not: a backup restore, `rsync -t`, `tar -xp`, or any re-publication of an archived generation lands new content carrying the old timestamp. An mtime-only check calls that unchanged, and the stale copy is then served until something else happens to touch the file.
 
-Size is deliberately not part of the comparison: a same-size replacement is exactly the case a size check misses, and a differing size is already caught by one of the two legs.
+**Size is a third leg, not a redundant one, and `Matches` does not compare it.** Each leg covers a different replacement, and neither two-leg form dominates the other:
+
+| second write | mtime | size | inode | `mtime && size` | `Matches` (`mtime && SameFile`) |
+| --- | --- | --- | --- | --- | --- |
+| rename, same tick, equal length | same | same | new | **misses** | catches |
+| rename, same tick, length changed | same | differs | new | catches | catches |
+| in-place, same tick, equal length | same | same | same | misses | misses |
+| in-place, same tick, length changed | same | differs | same | catches | **misses** |
+| anything crossing a tick | differs | — | — | catches | catches |
+
+So `mtime && SameFile && size` strictly dominates either pair. A reader of a file only this package publishes needs `Changed` alone; a reader whose file may also be rewritten in place keeps its own `info.Size() != cached` beside it — one `!=` at the call site, which is why no size leg is exported here. Row 3 is unreachable for any stat-based check, and that limit is unchanged either way.
 
 The zero `FileIdentity` records nothing and reports `Changed`, which is the fail direction a cache wants: a spurious reload costs one read, a missed reload serves stale data indefinitely. `FileIdentity` is a comparison primitive, not a policy: degradation states, stat-error handling, and re-stat cadence stay with the caller.
 

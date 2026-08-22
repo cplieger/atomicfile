@@ -164,14 +164,18 @@
 //
 // FileIdentity answers "is what I loaded still what is on disk?" from a stat
 // alone, for a reader caching a file another process publishes. The correct
-// form of that test is knowledge about this package's write barrier: mtime
-// equality AND os.SameFile identity, because an in-place writer keeps the
-// inode while moving the mtime, and a publish-by-rename installs a different
-// inode that a restore can hand the OLD timestamp. Either leg alone serves
-// stale content for one of the two write mechanisms; a size comparison misses
-// exactly the same-size replacement. It is a comparison primitive, not a
-// policy — degradation states, stat-error handling, and re-stat cadence stay
-// with the caller.
+// form of that test is knowledge about this package's write barrier. Matches
+// compares mtime equality AND os.SameFile identity, because an in-place writer
+// keeps the inode while usually moving the mtime, and a publish-by-rename
+// installs a different inode that a restore can hand the OLD timestamp. Either
+// leg alone serves stale content for one of the two write mechanisms. Usually,
+// because inode times come from a coarse clock tick: two writes inside one tick
+// carry byte-identical mtimes, so an in-place rewrite there moves neither leg
+// and a changed LENGTH is the only thing left that can see it. Size is
+// therefore a third leg rather than a redundant one, and a caller whose file
+// may be rewritten in place keeps a size comparison beside Changed. It is a
+// comparison primitive, not a policy — degradation states, stat-error
+// handling, and re-stat cadence stay with the caller.
 //
 // # Confinement
 //
