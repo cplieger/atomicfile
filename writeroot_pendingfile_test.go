@@ -50,7 +50,7 @@ func TestNewPendingFileInRoot(t *testing.T) {
 			t.Errorf("temp base name %q would not be reaped by CleanupStaleTemps", base)
 		}
 		// The embedded Name() must point at the real staged file so external
-		// verifiers can inspect it before Commit (the pg-autodump pattern).
+		// verifiers can inspect it before Commit.
 		if _, statErr := os.Stat(pf.Name()); statErr != nil {
 			t.Errorf("Stat(pf.Name()) = %v, want the staged temp visible at %q", statErr, pf.Name())
 		}
@@ -102,7 +102,6 @@ func TestNewPendingFileInRoot(t *testing.T) {
 			t.Fatalf("Cleanup: %v", err)
 		}
 
-		// Still usable after a Cleanup terminal state too.
 		if _, err := WriteFileInRoot(t.Context(), root, "third.txt", []byte("three")); err != nil {
 			t.Fatalf("WriteFileInRoot after pending Cleanup: %v (caller root must stay open)", err)
 		}
@@ -178,8 +177,8 @@ func TestNewPendingFileInRoot(t *testing.T) {
 		if _, err := pf.ReadFrom(strings.NewReader("streamed payload")); err != nil {
 			t.Fatalf("ReadFrom: %v", err)
 		}
-		// Verify the staged bytes through the embedded file before committing —
-		// the verify-before-publish pattern PendingFile exists for.
+		// Verify the staged bytes through the embedded file before
+		// committing — the verify-before-publish pattern PendingFile exists for.
 		if _, err := pf.Seek(0, 0); err != nil {
 			t.Fatalf("Seek: %v", err)
 		}

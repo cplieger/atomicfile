@@ -23,9 +23,9 @@ func pinRoot(t *testing.T) (*os.Root, string) {
 	return root, dir
 }
 
-// TestOpenParentInRoot_pins_a_nested_parent pins the ordinary case: the returned root
-// addresses the leaf's own directory, the returned base is the leaf, and operating on
-// that pair reaches the same file the caller named.
+// TestOpenParentInRoot_pins_a_nested_parent pins the ordinary case: the
+// returned root addresses the leaf's own directory and the returned base
+// is the leaf.
 func TestOpenParentInRoot_pins_a_nested_parent(t *testing.T) {
 	t.Parallel()
 	root, dir := pinRoot(t)
@@ -60,10 +60,9 @@ func TestOpenParentInRoot_pins_a_nested_parent(t *testing.T) {
 	}
 }
 
-// TestOpenParentInRoot_returns_a_closable_root_for_a_flat_name pins the API property that
-// makes the close unconditional: even for a leaf sitting directly under root — where the
-// pinned parent IS root's directory — the caller gets its OWN handle, so closing it can
-// never close the root the caller still owns.
+// TestOpenParentInRoot_returns_a_closable_root_for_a_flat_name pins that
+// the caller always gets its OWN handle, even for a leaf directly under
+// root, so closing it never closes the caller's root.
 func TestOpenParentInRoot_returns_a_closable_root_for_a_flat_name(t *testing.T) {
 	t.Parallel()
 	root, dir := pinRoot(t)
@@ -87,10 +86,10 @@ func TestOpenParentInRoot_returns_a_closable_root_for_a_flat_name(t *testing.T) 
 	}
 }
 
-// TestOpenParentInRoot_refuses_a_redirected_component pins what the descent exists for.
-// An os.Root FOLLOWS an in-root symlink component, so every one of these shapes would
-// otherwise resolve — to a directory the caller never inspected — and the operation the
-// caller then performs would land there.
+// TestOpenParentInRoot_refuses_a_redirected_component pins what the
+// descent exists for: os.Root FOLLOWS an in-root symlink component, so
+// each of these shapes would otherwise resolve to a directory the caller
+// never inspected.
 func TestOpenParentInRoot_refuses_a_redirected_component(t *testing.T) {
 	t.Parallel()
 
@@ -153,10 +152,9 @@ func TestOpenParentInRoot_refuses_a_redirected_component(t *testing.T) {
 	}
 }
 
-// TestOpenParentInRoot_reports_a_missing_component_as_not_exist pins the classification
-// callers branch on: a component that has vanished is the benign racing-deletion case and
-// must be distinguishable from a refusal, or every transient race is reported to an
-// operator as a misconfiguration.
+// TestOpenParentInRoot_reports_a_missing_component_as_not_exist pins that
+// a vanished component (the benign racing-deletion case) is distinguishable
+// from a refusal.
 func TestOpenParentInRoot_reports_a_missing_component_as_not_exist(t *testing.T) {
 	t.Parallel()
 	root, _ := pinRoot(t)
@@ -166,10 +164,8 @@ func TestOpenParentInRoot_reports_a_missing_component_as_not_exist(t *testing.T)
 	}
 }
 
-// TestOpenParentInRoot_rejects_names_that_name_no_entry pins the argument contract. A
-// name that cleans to "." or ".." has no final element to operate on, and answering with
-// a root pinned to something plausible would invite a caller to remove a directory it
-// never named.
+// TestOpenParentInRoot_rejects_names_that_name_no_entry pins that a name
+// cleaning to "." or ".." has no final element to operate on.
 func TestOpenParentInRoot_rejects_names_that_name_no_entry(t *testing.T) {
 	t.Parallel()
 	root, _ := pinRoot(t)
@@ -184,14 +180,10 @@ func TestOpenParentInRoot_rejects_names_that_name_no_entry(t *testing.T) {
 	}
 }
 
-// TestRemoveFileInRoot_removes_through_a_pinned_parent pins the whole point of the
-// exported removal: the file the caller named goes away, and a same-named file reachable
-// only through a swapped ancestor does not.
-//
-// The swap is the realistic one: the caller decided to remove old/x.pfx while old was a
-// real directory, and by the time the unlink runs the name is a symlink to a live
-// directory holding a file of the same name. A plain root.Remove would unlink the live
-// file, because os.Root follows an in-root symlink component.
+// TestRemoveFileInRoot_removes_through_a_pinned_parent pins that the file
+// the caller named goes away, and a same-named file reachable only
+// through a swapped ancestor does not: a plain root.Remove would unlink
+// the live file, because os.Root follows an in-root symlink component.
 func TestRemoveFileInRoot_removes_through_a_pinned_parent(t *testing.T) {
 	t.Parallel()
 
@@ -238,9 +230,9 @@ func TestRemoveFileInRoot_removes_through_a_pinned_parent(t *testing.T) {
 	})
 }
 
-// TestRemoveFileInRoot_refuses_a_non_regular_occupant pins that the name shape alone is
-// not enough to unlink something: a caller sweeping names it believes it wrote must not be
-// tricked into removing a directory, a symlink or a device node that took one of them.
+// TestRemoveFileInRoot_refuses_a_non_regular_occupant pins that a caller
+// sweeping names it believes it wrote cannot be tricked into removing a
+// directory, symlink or device node that took one of them.
 func TestRemoveFileInRoot_refuses_a_non_regular_occupant(t *testing.T) {
 	t.Parallel()
 	root, dir := pinRoot(t)
@@ -266,9 +258,8 @@ func TestRemoveFileInRoot_refuses_a_non_regular_occupant(t *testing.T) {
 	assertPresent(t, filepath.Join(dir, "real"), "the symlink target was never named")
 }
 
-// TestRemoveFileInRoot_reports_a_missing_file pins that an already-gone name is reported
-// rather than swallowed: whether that is success or a surprise is the caller's judgement,
-// and the sweeps in this package rely on telling it apart from a real failure.
+// TestRemoveFileInRoot_reports_a_missing_file pins that an already-gone
+// name is reported rather than swallowed.
 func TestRemoveFileInRoot_reports_a_missing_file(t *testing.T) {
 	t.Parallel()
 	root, _ := pinRoot(t)

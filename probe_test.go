@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// msgProbeTeardown is the Debug line tearDown emits for a teardown failure it
-// is not reporting; sharing the literal keeps the test in lockstep with it.
+// msgProbeTeardown is the Debug line tearDown emits for an unreported
+// teardown failure.
 const msgProbeTeardown = "atomicfile: writability probe teardown failed"
 
 // skipIfRootCannotBeDenied skips a test whose outcome depends on POSIX
@@ -28,8 +28,7 @@ func skipIfRootCannotBeDenied(t *testing.T) {
 	}
 }
 
-// assertEmptyDir fails t unless dir has no entries at all, which is the
-// stronger form of assertNoTempLeak for the probe's success path: the probe
+// assertEmptyDir fails t unless dir has no entries at all — the probe
 // must leave the directory exactly as it found it.
 func assertEmptyDir(t *testing.T, dir string) {
 	t.Helper()
@@ -119,7 +118,7 @@ func TestProbeWritable(t *testing.T) {
 
 	t.Run("mkdir_failure_reports_the_mkdir_stage", func(t *testing.T) {
 		t.Parallel()
-		// A regular file in the parent chain makes MkdirAll fail without any
+		// A regular file in the parent chain makes MkdirAll fail without
 		// permission trickery, so the stage is reachable as root too.
 		blocker := filepath.Join(t.TempDir(), "file")
 		if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
@@ -201,11 +200,9 @@ func TestProbeWritable(t *testing.T) {
 	})
 }
 
-// TestProbeWritableRelativeDir pins the dir argument's contract: it may be
-// relative, matching CleanupStaleTemps' dir rather than the write functions'
-// absolute-path requirement, because a preflight probes whatever path its
-// config handed it. It cannot be a parallel test — t.Chdir forbids that — so it
-// stands alone rather than inside TestProbeWritable.
+// TestProbeWritableRelativeDir pins that dir may be relative, matching
+// CleanupStaleTemps rather than the write functions' absolute-path
+// requirement. Not parallel: t.Chdir forbids it.
 func TestProbeWritableRelativeDir(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
@@ -347,12 +344,10 @@ func TestProbeWritableInRoot(t *testing.T) {
 	})
 }
 
-// TestProbeData covers the two stages that run while the probe file is open.
-// They are exercised at probeData rather than through ProbeWritable because
-// neither is constructible on a healthy directory the test owns: a write
-// failure needs a device that refuses data (/dev/full), and a sync failure
-// needs a handle that cannot be flushed (a pipe). Both are real filesystem
-// refusals, not injected ones.
+// TestProbeData covers the two stages that run while the probe file is
+// open, at probeData rather than ProbeWritable: neither is constructible
+// on a healthy directory the test owns (a write failure needs /dev/full, a
+// sync failure needs a pipe).
 func TestProbeData(t *testing.T) {
 	t.Parallel()
 
@@ -393,8 +388,8 @@ func TestProbeData(t *testing.T) {
 	}
 }
 
-// openProbeTemp creates a package-shaped probe file in a fresh temp directory
-// and returns the open handle.
+// openProbeTemp creates a package-shaped probe file in a fresh temp
+// directory and returns the open handle.
 func openProbeTemp(t *testing.T) *os.File {
 	t.Helper()
 	f, err := os.Create(filepath.Join(t.TempDir(), TempName()))
@@ -405,9 +400,9 @@ func openProbeTemp(t *testing.T) *os.File {
 	return f
 }
 
-// openUnflushable returns a handle that accepts a write and refuses a flush:
-// the write end of a pipe, whose Sync fails with EINVAL. It stands in for the
-// network filesystem that reports a deferred error only at fsync.
+// openUnflushable returns the write end of a pipe: it accepts a write
+// but Sync fails with EINVAL, standing in for a network filesystem that
+// defers its error to fsync.
 func openUnflushable(t *testing.T) *os.File {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -418,12 +413,11 @@ func openUnflushable(t *testing.T) *os.File {
 	return w
 }
 
-// TestProbeTearDown covers the two teardown stages and the leak accounting. A
-// same-owner test cannot make a real directory accept a create and refuse the
-// unlink (both need the same directory-write bit), so the refusal is
-// constructed where it is constructible: an entry replaced by a NON-EMPTY
-// directory makes Remove fail with ENOTEMPTY on every platform, and an
-// already-closed handle makes Close fail. No production seam is added for it.
+// TestProbeTearDown covers the two teardown stages and the leak
+// accounting. A same-owner test cannot make a real directory accept a
+// create and refuse the unlink, so the refusal is constructed instead: a
+// NON-EMPTY directory swapped in makes Remove fail with ENOTEMPTY, and an
+// already-closed handle makes Close fail.
 func TestProbeTearDown(t *testing.T) {
 	t.Parallel()
 
@@ -540,8 +534,8 @@ func TestProbeStageString(t *testing.T) {
 
 func TestProbeResultWritable(t *testing.T) {
 	t.Parallel()
-	// The split every consumer's policy is built on: a teardown failure still
-	// proves the directory took the bytes; anything earlier does not.
+	// A teardown failure still proves the directory took the bytes;
+	// anything earlier does not.
 	cases := map[ProbeStage]bool{
 		ProbeStageNone:   true,
 		ProbeStageMkdir:  false,
@@ -564,9 +558,9 @@ func TestProbeResultWritable(t *testing.T) {
 
 func TestProbeCause(t *testing.T) {
 	t.Parallel()
-	// A probe reports the filesystem error, not a *WriteError: that type means
-	// "the data did not reach its final path", a claim about a write the probe
-	// never performed.
+	// A probe reports the filesystem error, not a *WriteError, which means
+	// "the data did not reach its final path" — a claim about a write the
+	// probe never performed.
 	cause := errors.New("EACCES")
 	if got := probeCause(&WriteError{Phase: PhaseTempCreate, Err: cause}); !errors.Is(got, cause) {
 		t.Errorf("probeCause(*WriteError) = %v, want the unwrapped %v", got, cause)
@@ -579,10 +573,9 @@ func TestProbeCause(t *testing.T) {
 	}
 }
 
-// TestProbeLeakIsReclaimable ties the probe's own file name to the sweeps: a
-// probe left behind by a crash — or by a directory that denies the unlink — is
-// reclaimed by the library's normal stale-temp sweep, so no consumer has to
-// reconstruct the name shape to make its probe reclaimable.
+// TestProbeLeakIsReclaimable pins that a probe left behind by a crash, or
+// by a directory that denies the unlink, is reclaimed by the library's
+// normal stale-temp sweep.
 func TestProbeLeakIsReclaimable(t *testing.T) {
 	t.Parallel()
 
@@ -632,9 +625,9 @@ func TestProbeLeakIsReclaimable(t *testing.T) {
 	})
 }
 
-// seedLeakedProbe recreates a probe file under the exact name a probe chose and
-// backdates it past any sweep cutoff, standing in for the crash between create
-// and unlink that the test cannot schedule.
+// seedLeakedProbe recreates a probe file under the exact name a probe
+// chose and backdates it past any sweep cutoff, standing in for the crash
+// between create and unlink.
 func seedLeakedProbe(t *testing.T, dir, name string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

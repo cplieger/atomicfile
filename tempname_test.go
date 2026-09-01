@@ -7,11 +7,9 @@ import (
 	"time"
 )
 
-// TestIsPackageTemp pins the predicate to the sweep it is the exported face of:
-// for every name, the answer IsPackageTemp gives is exactly what
-// CleanupStaleTemps does to a backdated file of that name. A caller can then
-// use the predicate to decide whether its own file is reclaimable — or
-// deliberately NOT reclaimable — without reading the sweep's source.
+// TestIsPackageTemp pins the predicate to the sweep it is the exported face
+// of: for every name, IsPackageTemp's answer must match what
+// CleanupStaleTemps does to a backdated file of that name.
 func TestIsPackageTemp(t *testing.T) {
 	t.Parallel()
 
@@ -19,8 +17,7 @@ func TestIsPackageTemp(t *testing.T) {
 		".atomicfile-0.tmp":                    true,
 		".atomicfile-12345.tmp":                true,
 		".atomicfile-18446744073709551615.tmp": true,
-		// Caller-owned names that merely share the prefix or suffix. The
-		// all-digit middle is what keeps every one of these safe.
+		// Caller-owned names sharing only the prefix or suffix.
 		".atomicfile-notes.tmp":  false,
 		".atomicfile-.tmp":       false,
 		".atomicfile-12a.tmp":    false,
@@ -65,16 +62,13 @@ func TestIsPackageTemp(t *testing.T) {
 
 func TestIsPackageTempEmptyName(t *testing.T) {
 	t.Parallel()
-	// Not seedable as a file, so it is only a predicate case.
 	if IsPackageTemp("") {
 		t.Error("IsPackageTemp(\"\") = true, want false")
 	}
 }
 
 // TestTempName checks the generator's contract: every name it returns is one
-// the sweeps reclaim, and two names do not collide. This is the property a
-// caller would otherwise be betting on os.CreateTemp's undocumented choice of
-// decimal digits for its "*" substitution.
+// the sweeps reclaim, and two names do not collide.
 func TestTempName(t *testing.T) {
 	t.Parallel()
 

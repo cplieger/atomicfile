@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// permOf returns the bits chmod(2) owns for path — permissions plus
-// setuid/setgid/sticky — read with Lstat so a planted symlink is reported as
-// itself rather than as whatever it points at.
+// permOf returns the bits chmod(2) owns for path, read with Lstat so a
+// planted symlink is reported as itself, not its target.
 func permOf(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	fi, err := os.Lstat(path)
@@ -22,11 +21,10 @@ func permOf(t *testing.T, path string) os.FileMode {
 	return chmodBits(fi.Mode())
 }
 
-// mkdirExact creates dir and then CHMODs it to mode, because mkdir(2)'s mode is
-// a request: measured on the ZFS nfs4acl dataset this library is developed on,
-// os.Mkdir(dir, 0o700) stores 0770. A fixture built from the mkdir mode alone
-// would be asserting against whatever the test host's filesystem felt like
-// storing, which is the very drift EnsurePrivateDir exists to catch.
+// mkdirExact creates dir and then CHMODs it to mode, because mkdir(2)'s
+// mode is only a request (measured on ZFS nfs4acl: 0o700 mkdir stores
+// 0770), and a fixture built from the mkdir mode alone would assert
+// against whatever the filesystem happened to store.
 func mkdirExact(t *testing.T, dir string, mode os.FileMode) {
 	t.Helper()
 	if err := os.Mkdir(dir, mode); err != nil {
@@ -40,12 +38,10 @@ func mkdirExact(t *testing.T, dir string, mode os.FileMode) {
 	}
 }
 
-// mkdirStoresRequestedMode reports whether THIS filesystem honours a 0700 mkdir,
-// measured in dir rather than assumed. It is the oracle the create-path tests
-// need: on ext4/tmpfs a fresh 0700 directory comes back 0700 and no repair is
-// due, while on a dataset with an inheritable group ACE the same call stores
-// 0770 and the repair MUST fire. Asserting either outcome unconditionally would
-// pass on one host and fail on the other for the right reason.
+// mkdirStoresRequestedMode measures (rather than assumes) whether this
+// filesystem honours a 0700 mkdir — the oracle the create-path tests need,
+// since asserting either outcome unconditionally passes on one host and
+// fails on the other for the right reason.
 func mkdirStoresRequestedMode(t *testing.T, dir string) bool {
 	t.Helper()
 	probe := filepath.Join(dir, "_mode-oracle")
@@ -56,10 +52,9 @@ func mkdirStoresRequestedMode(t *testing.T, dir string) bool {
 	return permOf(t, probe) == privateDirMode
 }
 
-// TestEnforceModeStoresAndReportsTheMode pins the whole point of the primitive:
-// it reports the mode read back from the handle AFTER the chmod, not the mode
-// that was asked for, and it does so in both directions (a tightening and a
-// widening) so the return value cannot be a hard-coded echo of want.
+// TestEnforceModeStoresAndReportsTheMode pins that it reports the mode
+// read back from the handle AFTER the chmod, not the mode asked for, in
+// both a tightening and a widening direction.
 func TestEnforceModeStoresAndReportsTheMode(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -87,10 +82,9 @@ func TestEnforceModeStoresAndReportsTheMode(t *testing.T) {
 	}
 }
 
-// TestEnforceModeWorksOnADirectoryHandle pins that the primitive serves the
-// directory case — an *os.File is an *os.File — and that a directory's type bits
-// never read as a mismatch: comparing the raw os.FileMode would see ModeDir|0700
-// against 0700 and refuse a directory it had just set correctly.
+// TestEnforceModeWorksOnADirectoryHandle pins that a directory's type
+// bits never read as a mismatch: comparing the raw os.FileMode would see
+// ModeDir|0700 against 0700 and refuse a directory it just set correctly.
 func TestEnforceModeWorksOnADirectoryHandle(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "d")
@@ -113,9 +107,8 @@ func TestEnforceModeWorksOnADirectoryHandle(t *testing.T) {
 	}
 }
 
-// TestEnforceModeNilFile pins that the guard is a refusal rather than a nil
-// dereference: a caller whose open failed and whose error check slipped gets an
-// error it can match, not a panic.
+// TestEnforceModeNilFile pins that a nil file is a refusal, not a nil
+// dereference.
 func TestEnforceModeNilFile(t *testing.T) {
 	t.Parallel()
 	if _, err := EnforceMode(nil, privateDirMode); !errors.Is(err, ErrUnsafePath) {
@@ -123,19 +116,15 @@ func TestEnforceModeNilFile(t *testing.T) {
 	}
 }
 
-// Two error paths in this file are deliberately untested, and both for the same
-// reason rather than for want of effort. A failing fchmod/fstat needs the
-// descriptor's ownership or its mount taken away mid-call, which cannot be staged
-// in a temp directory without dropping thread credentials underneath a parallel
-// suite; and ErrModeNotStored is a property of the MOUNT — a filesystem that
-// stores something other than what chmod set — which is exactly the failure the
-// declined Result.Mode proposal noted could not be staged locally either. Both would need an injection seam whose only consumer
-// is the test that exercises it, which this package does not add for a branch that
-// returns the filesystem's own error unchanged.
+// Two error paths are deliberately untested: a failing fchmod/fstat needs
+// the descriptor's ownership or mount taken away mid-call, and
+// ErrModeNotStored is a property of the MOUNT itself. Neither is
+// stageable in a temp directory without an injection seam whose only
+// consumer would be this test.
 
-// TestEnsurePrivateDirCreatesWhenAbsent pins the ordinary path: the level did not
-// exist, this call made it, and what is on disk afterwards is owner-only whatever
-// the filesystem's opinion of the mkdir mode was.
+// TestEnsurePrivateDirCreatesWhenAbsent pins the ordinary path: the level
+// did not exist, this call made it, and what is on disk afterwards is
+// owner-only regardless of the filesystem's mkdir behavior.
 func TestEnsurePrivateDirCreatesWhenAbsent(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -155,17 +144,17 @@ func TestEnsurePrivateDirCreatesWhenAbsent(t *testing.T) {
 	if onDisk := permOf(t, dir); onDisk != privateDirMode {
 		t.Errorf("directory is %#o on disk, want %#o", onDisk, privateDirMode)
 	}
-	// Repaired is a statement about the FILESYSTEM, so it is asserted against
-	// what this filesystem was just measured doing rather than against a guess.
+	// Repaired describes the FILESYSTEM, so assert against what it was just
+	// measured doing, not a guess.
 	if wantRepaired := !honest; pd.Repaired != wantRepaired {
 		t.Errorf("Repaired = %v, want %v (a 0700 mkdir in %s stores %#o)",
 			pd.Repaired, wantRepaired, parent, permOf(t, dir))
 	}
 }
 
-// TestEnsurePrivateDirAdoptsCompliantExisting pins the second-run case every
-// consumer actually hits: a directory this process left behind on a previous boot
-// is adopted, reported as not-created, and left exactly as it was found.
+// TestEnsurePrivateDirAdoptsCompliantExisting pins the second-run case: a
+// directory left behind by a previous boot is adopted, reported as
+// not-created, and left exactly as found.
 func TestEnsurePrivateDirAdoptsCompliantExisting(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "state")
@@ -186,15 +175,12 @@ func TestEnsurePrivateDirAdoptsCompliantExisting(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirRefusesPlantedOccupant pins the refusals that make this a
-// custody check rather than a mkdir wrapper. Each case is something a local user
-// who wins the race to the name can leave there, and the sentinel is what lets a
-// caller tell "somebody planted an object at my directory's name" apart from a
-// mode or owner problem.
+// TestEnsurePrivateDirRefusesPlantedOccupant pins the refusals that make
+// this a custody check rather than a mkdir wrapper: each case is something
+// a local user winning the name race could leave there.
 //
-// The FIFO case carries a second property the assertion cannot show: it must
-// RETURN. open(2) on a named pipe with no writer blocks indefinitely, so a test
-// that hangs here is the finding.
+// The FIFO case also has to RETURN: open(2) on a pipe with no writer
+// blocks indefinitely, so a hang here is itself the finding.
 func TestEnsurePrivateDirRefusesPlantedOccupant(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -262,12 +248,10 @@ func TestEnsurePrivateDirRefusesPlantedOccupant(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirRefusesWideExistingMode pins the pre-existing half of the
-// mode rule, in both its parts: any group or other bit is a refusal, and the
-// directory is left exactly as found. The second part is the load-bearing one —
-// chmod'ing a directory another principal made into compliance would take over
-// their name and hand them whatever gets written under it, so the refusal must
-// not "help".
+// TestEnsurePrivateDirRefusesWideExistingMode pins that any group or
+// other bit on a pre-existing directory is refused AND the directory is
+// left exactly as found — chmod'ing another principal's directory into
+// compliance would take over their name.
 func TestEnsurePrivateDirRefusesWideExistingMode(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []os.FileMode{0o770, 0o750, 0o710, 0o707, 0o701, 0o704} {
@@ -286,13 +270,12 @@ func TestEnsurePrivateDirRefusesWideExistingMode(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirRefusesForeignOwner pins the check that is easiest to leave
-// out and least visible when it is missing: a perfectly-moded 0700 directory
-// owned by another uid passes every other check here, and its owner can still
+// TestEnsurePrivateDirRefusesForeignOwner pins that a perfectly-moded
+// 0700 directory owned by another uid is still refused: its owner could
 // rename or replace it after the verdict returns.
 //
-// The fixture needs privilege — an unprivileged process cannot give a directory
-// away — so the test skips rather than faking the ownership it is testing.
+// Needs privilege to chown a directory away, so it skips rather than
+// faking the ownership under test.
 func TestEnsurePrivateDirRefusesForeignOwner(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() != 0 {
@@ -310,17 +293,14 @@ func TestEnsurePrivateDirRefusesForeignOwner(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirRepairsWidenedCreate is the test the primitive exists for:
-// a directory this call created whose mode came back WIDER than the 0700 it
-// asked for must be repaired and re-verified, not returned as compliant.
+// TestEnsurePrivateDirRepairsWidenedCreate pins that a directory this
+// call created, whose mode came back WIDER than 0700, is repaired and
+// re-verified rather than returned as compliant.
 //
-// The widening is real, not mocked. A setgid parent makes the kernel itself store
-// something other than what mkdir requested — Linux propagates S_ISGID to a new
-// subdirectory — which is the same class of divergence as the inheritable
-// group@:rwx ACE measured on ZFS (there the permission bits widen to 0770; here
-// the setgid bit appears), and it reproduces on any Linux filesystem. The fixture
-// is verified before the assertion: if this kernel stops widening, the test fails
-// as INVALID rather than passing vacuously.
+// The widening is real: a setgid parent makes Linux propagate S_ISGID to
+// a new subdirectory. The fixture is verified before the assertion, so a
+// kernel that stops widening fails the test as INVALID rather than
+// passing vacuously.
 func TestEnsurePrivateDirRepairsWidenedCreate(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "parent")
@@ -361,9 +341,8 @@ func TestEnsurePrivateDirRepairsWidenedCreate(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirDoesNotWarnWithoutARepair pins the other half of that log
-// contract: the Warn says "this filesystem ignored a mode request", so it must
-// not fire on a filesystem that honoured one.
+// TestEnsurePrivateDirDoesNotWarnWithoutARepair pins that the Warn must
+// not fire on a filesystem that honoured the mode request.
 func TestEnsurePrivateDirDoesNotWarnWithoutARepair(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
@@ -379,10 +358,9 @@ func TestEnsurePrivateDirDoesNotWarnWithoutARepair(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirRejectsBadPaths pins that the path gate is the same one the
-// rest of the ambient-path surface applies, and that it fires before anything is
-// created: a relative path would make the verdict a statement about the process's
-// current directory.
+// TestEnsurePrivateDirRejectsBadPaths pins that the path gate fires
+// before anything is created: a relative path would make the verdict a
+// statement about the process's current directory.
 func TestEnsurePrivateDirRejectsBadPaths(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -404,10 +382,9 @@ func TestEnsurePrivateDirRejectsBadPaths(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirDoesNotCreateParents pins the one-level contract: a missing
-// ancestor is the caller's to establish, level by level, because only the caller
-// knows which levels are its own. An os.MkdirAll here would create ancestors this
-// function never inspected and could not vouch for.
+// TestEnsurePrivateDirDoesNotCreateParents pins the one-level contract:
+// a missing ancestor is the caller's to establish. An os.MkdirAll here
+// would create ancestors this function never inspected.
 func TestEnsurePrivateDirDoesNotCreateParents(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -421,9 +398,9 @@ func TestEnsurePrivateDirDoesNotCreateParents(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDirLoopsForAMultiLevelPath pins the composition the doc
-// prescribes, and the reason it is the caller's loop: each level gets its own
-// verdict, and the outer level is established before the inner one is even named.
+// TestEnsurePrivateDirLoopsForAMultiLevelPath pins that each level gets
+// its own verdict, with the outer level established before the inner one
+// is even named.
 func TestEnsurePrivateDirLoopsForAMultiLevelPath(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -444,11 +421,10 @@ func TestEnsurePrivateDirLoopsForAMultiLevelPath(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput pins the option
-// that keeps a mode fix from becoming an outage on upgrade. An app whose earlier
-// release created <root>/<key>/ at 0700 on a filesystem that stored 0770 meets
-// its OWN directory on the next run; the default rule refuses it, which fails
-// every item at a directory the app itself made.
+// TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput pins the
+// upgrade case: an app whose earlier release created a 0700 dir that
+// stored 0770 meets its OWN directory on the next run, and the default
+// rule would refuse it.
 func TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "legacy")
@@ -472,9 +448,9 @@ func TestEnsurePrivateDir_RepairOwnedDirAdoptsTheAppsOwnPastOutput(t *testing.T)
 	}
 }
 
-// TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption pins that the
-// default is unchanged, so adding the option cannot silently narrow a directory
-// somebody widened on purpose (seadex-scout's report dir is the live case).
+// TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption pins that
+// the default is unchanged: the option must not silently narrow a
+// directory somebody widened on purpose.
 func TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "shared")
@@ -488,11 +464,10 @@ func TestEnsurePrivateDir_RefusesAnOwnedWideDirWithoutTheOption(t *testing.T) {
 	}
 }
 
-// TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner pins that the
-// option relaxes exactly one refusal. Ownership is what makes repairing sound —
-// mkdir(2) gives a directory to its creator and a directory cannot be hard-link targeted
-// — so the euid check must keep firing first, or the option would let the library
-// chmod a neighbour's directory.
+// TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner pins that
+// the option relaxes exactly one refusal: the euid check must still fire
+// first, or the option would let the library chmod a neighbour's
+// directory.
 func TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() != 0 {
@@ -509,10 +484,9 @@ func TestEnsurePrivateDir_RepairOwnedDirStillRefusesAForeignOwner(t *testing.T) 
 	}
 }
 
-// TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone pins that the
-// option is not a blanket chmod: a pre-existing directory that is already private
-// is adopted untouched and reports no repair, so an app can trust Repaired as a
-// signal that the filesystem drifted rather than as noise on every boot.
+// TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone pins
+// that the option is not a blanket chmod: an already-private directory is
+// adopted untouched and reports no repair.
 func TestEnsurePrivateDir_RepairOwnedDirLeavesAnAlreadyPrivateDirAlone(t *testing.T) {
 	t.Parallel()
 	dir := filepath.Join(t.TempDir(), "fine")

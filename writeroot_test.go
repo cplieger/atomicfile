@@ -88,7 +88,6 @@ func TestWriteReaderInRoot(t *testing.T) {
 	t.Run("writer_to_fast_path", func(t *testing.T) {
 		t.Parallel()
 		root, dir := openTestRoot(t)
-		// bytes.Reader implements io.WriterTo.
 		if _, err := WriteReaderInRoot(t.Context(), root, "wt", bytes.NewReader([]byte("fast"))); err != nil {
 			t.Fatalf("WriteReaderInRoot: %v", err)
 		}
@@ -146,9 +145,8 @@ func TestWriteReaderInRoot(t *testing.T) {
 
 	t.Run("nil_root_takes_precedence_over_nil_reader", func(t *testing.T) {
 		t.Parallel()
-		// Both root and reader are nil: the nil-root contract (ErrUnsafePath)
-		// must win over the nil-reader guard, matching writeAtomicInRoot's
-		// documented "A nil root returns ErrUnsafePath" behavior.
+		// The nil-root contract (ErrUnsafePath) must win over the nil-reader
+		// guard, matching writeAtomicInRoot's documented behavior.
 		if _, err := WriteReaderInRoot(t.Context(), nil, "f", nil); !errors.Is(err, ErrUnsafePath) {
 			t.Fatalf("err = %v, want ErrUnsafePath", err)
 		}
@@ -205,7 +203,6 @@ func TestWriteInRoot_Confinement(t *testing.T) {
 		if !errors.Is(err, ErrSymlinkTarget) {
 			t.Fatalf("err = %v, want ErrSymlinkTarget", err)
 		}
-		// The symlink target must be untouched.
 		assertContent(t, filepath.Join(dir, "real"), "real")
 	})
 }
@@ -259,8 +256,8 @@ func TestWriteInRoot_CancelledContextLeavesNoTarget(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// TestWriteFileInRoot_DirFsyncFailureNotDurable mutates the fsyncRootDir seam,
-// so it must not run in parallel.
+// TestWriteFileInRoot_DirFsyncFailureNotDurable mutates the fsyncRootDir
+// seam, so it must not run in parallel.
 func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	stubFsyncRootDir(t, errors.New("injected dir fsync failure"))
 	root, dir := openTestRoot(t)
@@ -272,10 +269,9 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	if res.Durable {
 		t.Errorf("Durable = true, want false when the parent-dir fsync fails")
 	}
-	// The data still landed despite the non-durable fsync.
 	assertContent(t, filepath.Join(dir, "f"), "x")
-	// The non-durable Warn must carry both root and path so an operator using
-	// multiple roots can identify which on-disk file is not durable.
+	// The non-durable Warn must carry both root and path so an operator
+	// using multiple roots can identify which on-disk file is not durable.
 	var found bool
 	for _, r := range h.Records() {
 		if r.Level != slog.LevelWarn {
@@ -300,9 +296,9 @@ func TestWriteFileInRoot_DirFsyncFailureNotDurable(t *testing.T) {
 	}
 }
 
-// TestRandomTempName_ReapableShape ties the root-confined temp names to the
-// stale-temp sweep: every name createTempInRoot would use must match the shape
-// CleanupStaleTemps reaps, or crash orphans from a root write would leak.
+// TestRandomTempName_ReapableShape ties root-confined temp names to the
+// stale-temp sweep: every name createTempInRoot would use must match the
+// shape CleanupStaleTemps reaps, or crash orphans from a root write leak.
 func TestRandomTempName_ReapableShape(t *testing.T) {
 	t.Parallel()
 	for range 1000 {
@@ -313,9 +309,9 @@ func TestRandomTempName_ReapableShape(t *testing.T) {
 	}
 }
 
-// TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug is the root-confined
-// twin of TestRemoveTemp_SuccessfulRemoval_DoesNotLogDebug: a successful
-// removal is silent.
+// TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug is the
+// root-confined twin of TestRemoveTemp_SuccessfulRemoval_DoesNotLogDebug: a
+// successful removal is silent.
 func TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
@@ -335,9 +331,10 @@ func TestRemoveTempInRoot_SuccessfulRemoval_DoesNotLogDebug(t *testing.T) {
 }
 
 // TestRemoveTempInRoot_FailedRemoval_LogsDebug is the root-confined twin of
-// TestRemoveTemp_FailedRemoval_LogsDebug: a removal failing for a non-ErrNotExist
-// reason is logged once at Debug. A non-empty directory fails os.Remove with
-// ENOTEMPTY on every platform and is not bypassed by root.
+// TestRemoveTemp_FailedRemoval_LogsDebug: a removal failing for a
+// non-ErrNotExist reason is logged once at Debug. A non-empty directory
+// fails os.Remove with ENOTEMPTY on every platform and is not bypassed by
+// root.
 func TestRemoveTempInRoot_FailedRemoval_LogsDebug(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)

@@ -111,8 +111,7 @@ func TestReadBoundedInRoot(t *testing.T) {
 		}
 		defer root.Close()
 
-		// The point of O_NONBLOCK: opening a FIFO with no writer blocks forever, so a
-		// caller with one goroutine would hang rather than get an error.
+		// O_NONBLOCK: opening a FIFO with no writer blocks forever otherwise.
 		done := make(chan error, 1)
 		go func() {
 			_, readErr := atomicfile.ReadBoundedInRoot(t.Context(), root, "pipe.pem", 1024)

@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// tempInDir returns the mode of the single staging file in dir, i.e. the entry
-// that is not the target. It exists so a test can observe the temp WHILE the
-// write is in flight, which is the only moment the exposure below is visible.
+// tempInDir returns the mode of the single staging file in dir, i.e. the
+// entry that is not the target.
 func tempInDir(t *testing.T, dir, target string) (string, os.FileMode) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -33,21 +32,14 @@ func tempInDir(t *testing.T, dir, target string) (string, os.FileMode) {
 	return "", 0
 }
 
-// TestWrite_StagingFileIsOwnerOnlyBeforeAnyDataIsWritten pins the confidentiality
-// window createTempInRoot's enforcement closes.
-//
-// The temp has to live in the TARGET's parent directory, because publishing is a
-// same-filesystem rename. The 0o600 in its O_CREATE|O_EXCL is only a REQUEST, and
-// on a filesystem carrying an inheritable group ACE the kernel stores 0770 —
-// measured on the ZFS nfs4acl dataset this library is developed on. The caller's
-// payload is written into that descriptor, so without enforcement at creation a
-// secret written through WithMode(0o600) is group-readable AND group-writable for
-// the whole duration of the write, and only narrowed afterwards.
-//
-// The observation happens INSIDE the reader, which the write engine pulls from
-// between creating the temp and finalizing it. Asserting the mode after the write
-// returned would prove nothing: by then finalizeTempFile has already applied the
-// caller's mode, so the window would have closed whether or not it was ever open.
+// TestWrite_StagingFileIsOwnerOnlyBeforeAnyDataIsWritten pins the
+// confidentiality window createTempInRoot's enforcement closes: the 0o600
+// passed to O_CREATE|O_EXCL is only a request, and a filesystem with an
+// inheritable group ACL can store something wider (measured: ZFS nfs4acl
+// stores 0770). The observation happens INSIDE the reader the write engine
+// pulls from between creating the temp and finalizing it — asserting the
+// mode after the write returned would prove nothing, since finalizeTempFile
+// has by then already applied the caller's mode.
 func TestWrite_StagingFileIsOwnerOnlyBeforeAnyDataIsWritten(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "secret.json")
@@ -77,26 +69,20 @@ func TestWrite_StagingFileIsOwnerOnlyBeforeAnyDataIsWritten(t *testing.T) {
 	}
 }
 
-// readerFunc adapts a func to io.Reader so the test can run an assertion at the
-// exact point the write engine pulls data.
+// readerFunc adapts a func to io.Reader so the test can run an assertion at
+// the exact point the write engine pulls data.
 type readerFunc func([]byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
-// TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored pins that the write
-// path's mode step is a VERIFIED postcondition and that its failure stays
-// classifiable. finalizeTempFile enforces on the handle, so a filesystem that
-// refuses the mode fails the write instead of publishing a wider file and
-// reporting success. The failure arrives as a *WriteError at PhaseTempChmod, and
-// its chain must still match ErrModeNotStored — that is what lets a caller tell
-// "the mode did not take" apart from every other write failure, and it only works
-// because WriteError implements Unwrap.
-//
-// The mismatch leg is asserted against a constructed error rather than a real
-// write, deliberately: no filesystem reachable from this test refuses a chmod
-// (measured — the ZFS nfs4acl dataset widens the CREATE and honours the chmod),
-// so the question worth pinning here is the error CHAIN the write path now
-// returns, not EnforceMode's own comparison, which privatedir_test.go owns.
+// TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored pins that the
+// write path's mode step is a verified postcondition: a failure arrives as
+// a *WriteError at PhaseTempChmod and its chain must still match
+// ErrModeNotStored via Unwrap. The mismatch leg is asserted against a
+// constructed error, deliberately: no filesystem reachable from this test
+// refuses a chmod, so the question worth pinning is the error CHAIN the
+// write path returns, not EnforceMode's own comparison (privatedir_test.go
+// owns that).
 func TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored(t *testing.T) {
 	t.Parallel()
 
@@ -115,8 +101,8 @@ func TestWrite_ModeMismatchIsAWriteErrorMatchingErrModeNotStored(t *testing.T) {
 		t.Errorf("phase = %v, want PhaseTempChmod", we.Phase)
 	}
 
-	// And the happy path: an explicit mode is what ends up on disk, read back
-	// rather than assumed.
+	// And the happy path: an explicit mode is what ends up on disk, read
+	// back rather than assumed.
 	target := filepath.Join(t.TempDir(), "cfg.json")
 	if _, err := WriteFile(t.Context(), target, []byte("{}"), WithMode(0o600)); err != nil {
 		t.Fatalf("WriteFile: %v", err)

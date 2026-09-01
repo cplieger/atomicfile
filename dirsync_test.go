@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-// A parent-directory fsync failure is NOT a hard error in the new API: the
-// rename already succeeded, so the data is at the final path. The write
-// reports Result{Durable:false} with a nil error, and logs a Warn. This must
-// hold for every durable write entry point.
+// A parent-directory fsync failure is not a hard error: the rename already
+// succeeded, so the data is at the final path. The write reports
+// Result{Durable:false} with a nil error, and logs a Warn. Must hold for
+// every durable write entry point.
 func TestDirSyncFailure_ReportsNotDurableNotError(t *testing.T) {
 	sentinel := errors.New("injected dir fsync failure")
 

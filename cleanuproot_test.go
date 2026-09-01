@@ -228,9 +228,8 @@ func TestCleanupStaleTempsInRoot_counts_unreadable_separately(t *testing.T) {
 // TestCleanupStaleTempsInRoot_refused_candidate_counts_as_failed pins the case a
 // confined sweep exists for: an output subdirectory swapped for a symlink pointing
 // out of the tree. The root refuses to stat through it, so the candidate must be
-// counted Failed (an operator signal that orphans may be accumulating) and NOTHING
-// outside the root may be unlinked. Ported from cert-converter's app-side sweep when
-// it adopted this function.
+// counted Failed (an operator signal that orphans may be accumulating) and nothing
+// outside the root may be unlinked.
 func TestCleanupStaleTempsInRoot_refused_candidate_counts_as_failed(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()

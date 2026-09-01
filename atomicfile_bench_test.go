@@ -16,9 +16,7 @@ func BenchmarkWriteFile(b *testing.B) {
 			ctx := b.Context()
 			b.SetBytes(int64(size))
 			b.ReportAllocs()
-			// b.Loop excludes everything above it from the timing, so no
-			// ResetTimer, and it keeps the call from being optimized away.
-			for b.Loop() {
+			for b.Loop() { // excludes setup from timing; no ResetTimer needed
 				if _, err := WriteFile(ctx, path, data); err != nil {
 					b.Fatal(err)
 				}
@@ -68,10 +66,8 @@ func BenchmarkPendingFileCommit(b *testing.B) {
 	}
 }
 
-// BenchmarkMkdirChain separates the two WithMkdirMode paths, because only one of
-// them pays for the per-level mode enforcement and parent fsync: a write into a
-// directory that already exists creates nothing and costs what it always did,
-// while a write that adds levels pays one directory fsync per level.
+// BenchmarkMkdirChain separates the two WithMkdirMode paths: only the
+// level-creating one pays for per-level mode enforcement and directory fsync.
 func BenchmarkMkdirChain(b *testing.B) {
 	b.Run("existing_parent", func(b *testing.B) {
 		dir := b.TempDir()
@@ -92,8 +88,7 @@ func BenchmarkMkdirChain(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
 			n++
-			// A fresh chain each iteration, so every one actually creates three
-			// levels rather than measuring the already-exists path after the first.
+			// Fresh chain per iteration so each one creates three levels.
 			path := fmt.Sprintf("%s/r%d/a/b/target", base, n)
 			if _, err := WriteFile(ctx, path, []byte("x"), WithMkdirMode(0o755)); err != nil {
 				b.Fatal(err)
