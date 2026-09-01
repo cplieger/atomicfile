@@ -19,13 +19,10 @@ import (
 // mode bits are not meaningful.
 func isWindows() bool { return runtime.GOOS == "windows" }
 
-// Log messages asserted by the best-effort logging tests; sharing the literals
-// keeps the tests in lockstep with the production strings they pin.
-//
-// msgStaleRemoved and msgStaleRemoveFail are the two aggregate lines
-// CleanupStaleTemps used to emit before it returned a SweepResult. They are kept
-// deliberately: the test that pins their ABSENCE needs the exact strings, and a
-// regression that re-adds either line would otherwise pass.
+// Log messages asserted by the best-effort logging tests; sharing the
+// literals keeps the tests in lockstep with the production strings they pin.
+// msgStaleRemoved and msgStaleRemoveFail pin the ABSENCE of two lines
+// CleanupStaleTemps no longer emits, so a regression re-adding either is caught.
 const (
 	msgRemoveTempFailed = "atomicfile: temp file cleanup failed"
 	msgStaleRemoved     = "atomicfile.CleanupStaleTemps: removed stale temps"
@@ -35,9 +32,8 @@ const (
 )
 
 // replaceWithNonEmptyDir deletes the file at path and puts a non-empty
-// directory in its place. os.Remove of a non-empty directory fails with a
-// non-ErrNotExist error (ENOTEMPTY) on every platform and is NOT bypassed by
-// root, so it forces a temp-removal to fail without any permission tricks.
+// directory in its place, forcing a later removal to fail with ENOTEMPTY
+// (which root does not bypass) without any permission tricks.
 func replaceWithNonEmptyDir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.Remove(path); err != nil {
@@ -75,10 +71,9 @@ func assertContent(t *testing.T, path, want string) {
 	}
 }
 
-// stubFsyncRootDir replaces the package fsyncRootDir seam with one that returns
-// err, restoring the original when the test finishes. Every write entry point
-// (absolute-path adapters included) commits through this seam. Tests using it
-// must not call t.Parallel: they mutate package state.
+// stubFsyncRootDir replaces the package fsyncRootDir seam with one that
+// returns err, restoring the original on test end. Every write entry point
+// commits through this seam. Callers must not use t.Parallel: package state.
 func stubFsyncRootDir(t *testing.T, err error) {
 	t.Helper()
 	orig := fsyncRootDir
@@ -141,10 +136,8 @@ func (e *errWriterTo) WriteTo(w io.Writer) (int64, error) {
 }
 
 // seqCancelCtx reports nil for the first cancelAt-1 calls to Err, then
-// context.Canceled thereafter (1-indexed). It drives cancellation to a specific
-// ctx.Err() checkpoint deep inside a synchronous call chain that exposes no
-// other interleaving hook, letting tests cover the mid-barrier ctx guards
-// inside finalizeTempFile.
+// context.Canceled thereafter (1-indexed), driving cancellation to a specific
+// ctx.Err() checkpoint inside finalizeTempFile's mid-barrier guards.
 type seqCancelCtx struct {
 	context.Context
 	mu       sync.Mutex
@@ -164,34 +157,18 @@ func (c *seqCancelCtx) Err() error {
 
 // captureHandler is a slog.Handler that records every emitted record, letting
 // the best-effort logging tests assert which Debug/Info/Warn lines fired.
-//
-// It is deliberately atomicfile-local rather than a dependency on the fleet
-// reference implementation, github.com/cplieger/slogx/capture (package
-// capture in the slogx repo — compare against it when changing this helper):
-// atomicfile is a foundational zero-dep library, and a ~40-line test recorder
-// is not worth a new module edge — the same call auth made with its
-// internal/capture copy.
-// It matches the reference's semantics for the subset atomicfile exercises;
-// the two gaps are deliberate and safe today:
-//
-//   - WithAttrs/WithGroup return the receiver unchanged, so derivation
-//     context is NOT captured; atomicfile never logs through Logger.With or
-//     WithGroup.
-//   - Records are cloned verbatim, not normalized (no LogValuer resolution,
-//     no empty-group elision); atomicfile logs only plain resolved
-//     key-values.
-//
-// If production logging ever adopts With/WithGroup or LogValuer attrs,
-// re-check this helper against slogx/capture's derivation semantics.
+// Deliberately local rather than a github.com/cplieger/slogx/capture
+// dependency: atomicfile is zero-dep, and this is ~40 lines. WithAttrs/
+// WithGroup return the receiver unchanged (atomicfile never uses either), and
+// records are cloned verbatim with no LogValuer resolution — re-check this
+// helper if production logging ever adopts them.
 type captureHandler struct {
 	records []slog.Record
 	mu      sync.Mutex
 }
 
-// Enabled reports true for every level so nothing is filtered before capture.
 func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
 
-// Handle records a clone of r. It satisfies slog.Handler.
 func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -199,15 +176,11 @@ func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-// WithAttrs returns the receiver unchanged; base attributes are not captured.
 func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 
-// WithGroup returns the receiver unchanged; groups are not captured.
 func (h *captureHandler) WithGroup(string) slog.Handler { return h }
 
-// Records returns a locked snapshot copy of the captured records, in order,
-// matching the reference's snapshot-accessor contract (tests never read the
-// raw slice).
+// Records returns a locked snapshot copy of the captured records, in order.
 func (h *captureHandler) Records() []slog.Record {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -215,10 +188,8 @@ func (h *captureHandler) Records() []slog.Record {
 }
 
 // CountLevelExact returns how many captured records match both level and
-// message exactly. It is the level-scoped exact matcher for log lines pinned
-// by an external contract (the Loki alert shapes): exact equality on the
-// message per the reference's CountExact rationale — a substring match would
-// false-pass a positive must-emit assertion on a superstring message.
+// message exactly. Exact match, not substring: a substring match would
+// false-pass a must-emit assertion against a superstring message.
 func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
 	n := 0
 	for _, r := range h.Records() {
@@ -230,9 +201,8 @@ func (h *captureHandler) CountLevelExact(level slog.Level, message string) int {
 }
 
 // CountLevel returns how many captured records were emitted at level,
-// regardless of message. It is the matcher for an assertion about a level's
-// PRESENCE or ABSENCE as a whole — "no aggregate Warn at all" — where naming a
-// message would let a reworded or newly added line slip through.
+// regardless of message — for an assertion about a level's PRESENCE or
+// ABSENCE as a whole, where naming a message would let a reworded line slip through.
 func (h *captureHandler) CountLevel(level slog.Level) int {
 	n := 0
 	for _, r := range h.Records() {
@@ -244,11 +214,9 @@ func (h *captureHandler) CountLevel(level slog.Level) int {
 }
 
 // recordFsyncRootDir replaces the package fsyncRootDir seam with one that
-// records every (root name, dir) pair it is asked to sync and then runs the
-// original, restoring it when the test finishes. It returns a function that
-// reports the recorded dirs in call order.
-//
-// Tests using it must not call t.Parallel: they mutate package state.
+// records every dir it is asked to sync and then runs the original,
+// restoring it on test end. Returns a function reporting the recorded dirs
+// in call order. Callers must not use t.Parallel: package state.
 func recordFsyncRootDir(t *testing.T) func() []string {
 	t.Helper()
 	orig := fsyncRootDir
@@ -268,14 +236,10 @@ func recordFsyncRootDir(t *testing.T) func() []string {
 	}
 }
 
-// withUmask sets the process umask for the duration of the test and restores it
-// afterwards. The umask is process-global, so a test using it must not call
-// t.Parallel.
-//
-// It exists because a mode passed to mkdir(2) is a REQUEST that umask narrows,
-// which is the whole reason mkdirAllInRoot enforces the mode instead of trusting
-// it. A test run under the usual 022 cannot tell an enforced mode from a
-// requested one.
+// withUmask sets the process umask for the test's duration and restores it
+// after. Process-global, so callers must not use t.Parallel. Needed because a
+// mode passed to mkdir(2) is only a REQUEST that umask narrows, and a test
+// run under the usual 022 can't tell an enforced mode from a requested one.
 func withUmask(t *testing.T, mask int) {
 	t.Helper()
 	prev := syscall.Umask(mask)
@@ -298,21 +262,20 @@ func assertDirMode(t *testing.T, path string, want os.FileMode) {
 	}
 }
 
-// captureWarn returns a logger that records Warn and above into a buffer, plus a
-// function that reports what has been logged. It is an explicit logger passed
-// through WithLogger, not a swap of slog.Default(), so it needs no serialization
-// of its own.
+// captureWarn returns a logger that records Warn and above into a buffer,
+// plus a function reporting what has been logged. An explicit logger passed
+// through WithLogger, not a slog.Default() swap, so it needs no
+// serialization of its own.
 func captureWarn() (logger *slog.Logger, logged func() string) {
 	var buf bytes.Buffer
 	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
 	return slog.New(h), buf.String
 }
 
-// occupyOnRead runs occupy once, on the first Read, before delegating. It exists
-// to land a filesystem change in the window between the pre-write target guard
-// and the rename — the one window the guard cannot close — so the PhaseRename arm
-// stays reachable deterministically. It deliberately does NOT implement
-// io.WriterTo, keeping the copy on the per-Read path.
+// occupyOnRead runs occupy once, on the first Read, before delegating, to
+// land a filesystem change in the window between the pre-write target guard
+// and the rename so the PhaseRename arm stays reachable deterministically.
+// Deliberately does NOT implement io.WriterTo, keeping the copy per-Read.
 type occupyOnRead struct {
 	r      io.Reader
 	occupy func()

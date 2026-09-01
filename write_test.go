@@ -116,10 +116,8 @@ func TestWriteFile(t *testing.T) {
 	})
 
 	// A missing parent without WithMkdirMode must fail with PhaseTempCreate:
-	// the destination could not be opened for temp creation. vibekit's
-	// transient-failure classification branches on exactly this phase, so the
-	// adapter's os.OpenRoot failure mapping is a pinned contract, not an
-	// implementation detail.
+	// vibekit's transient-failure classification branches on exactly this
+	// phase.
 	t.Run("missing_parent_is_PhaseTempCreate_without_mkdir", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
@@ -201,12 +199,10 @@ func TestWriteFile_ZeroPerm(t *testing.T) {
 	_ = os.Chmod(path, 0o644)
 }
 
-// The rename-failure branch on a single-call write, reached the only way that
-// survives the pre-write target guard: the guard runs before the caller's data is
-// streamed, so a reader that plants a directory at the target as a side effect of
-// Read lands between the guard and the rename. That is exactly the race the guard
-// cannot close, since rename(2) has no "only if the destination is a regular
-// file" mode.
+// The rename-failure branch on a single-call write, reached the only way
+// that survives the pre-write target guard: a reader that plants a
+// directory at the target as a side effect of Read lands between the guard
+// and the rename.
 func TestWriteReader_RenameFailure_ReportsRenamePhase(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -452,8 +448,7 @@ func TestMkdirMode_BlockedByFile(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// A regular file in the parent chain makes MkdirAll fail ENOTDIR; the
-	// write must error and leave no temp.
+	// A regular file in the parent chain makes MkdirAll fail ENOTDIR.
 	path := filepath.Join(blocker, "sub", "file.txt")
 	_, err := WriteFile(t.Context(), path, []byte("data"), WithMkdirMode(0o755))
 	if err == nil {
@@ -463,11 +458,9 @@ func TestMkdirMode_BlockedByFile(t *testing.T) {
 }
 
 // TestWriteFile_MkdirMode_ParentNotWritable_WrapsError pins the MkdirAll
-// failure contract: a traversable but non-writable parent makes MkdirAll fail
-// EACCES, so the error is the "create parent directory" wrap of
-// os.ErrPermission, never a *WriteError (which is reserved for the
-// destination-open and post-temp-create phases). Non-root only; not parallel,
-// matching the sibling permission tests.
+// failure contract: a traversable but non-writable parent makes MkdirAll
+// fail EACCES, so the error wraps os.ErrPermission, never a *WriteError.
+// Non-root only; not parallel, matching the sibling permission tests.
 func TestWriteFile_MkdirMode_ParentNotWritable_WrapsError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX mode bits")
@@ -537,8 +530,6 @@ func TestWriteReader_ConcurrentSamePath(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// ── Cancellation: whole-call and mid-barrier, never leaving a partial file ─
-
 func TestWrite_CancelledContext_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -552,9 +543,9 @@ func TestWrite_CancelledContext_NoTempLeak(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// The absolute write path checks ctx at openParentRoot (1) and openTempForRoot
-// (2); cancelAt=3 therefore trips the ctx guard at the top of finalizeTempFile
-// (after the temp write, before chmod).
+// The absolute write path checks ctx at openParentRoot (1) and
+// openTempForRoot (2); cancelAt=3 therefore trips the ctx guard at the top
+// of finalizeTempFile (after the temp write, before chmod).
 func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -570,9 +561,9 @@ func TestWriteFile_CancelAfterWrite_NoTempLeak(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// cancelAt=4 trips the post-Sync ctx guard inside finalizeTempFile (checks 1-2
-// are the openParentRoot and openTempForRoot preamble guards, 3 the pre-chmod
-// guard).
+// cancelAt=4 trips the post-Sync ctx guard inside finalizeTempFile (checks
+// 1-2 are the openParentRoot and openTempForRoot preamble guards, 3 the
+// pre-chmod guard).
 func TestWriteFile_CancelAfterSync_NoTempLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -604,11 +595,8 @@ func TestWriteReader_CancelMidBarrier_NoTempLeak(t *testing.T) {
 }
 
 // WriteReader takes the io.WriterTo fast path when the source implements it
-// (strings.Reader does). writerCtx wraps the destination so the WriterTo write
-// still observes ctx cancellation. seqCancelCtx{cancelAt:3} passes the
-// openParentRoot and openTempForRoot ctx checks then trips inside the first
-// writerCtx.Write, so the write aborts with a PhaseTempWrite WriteError
-// wrapping context.Canceled, leaving no final file and no temp.
+// (strings.Reader does). seqCancelCtx{cancelAt:3} passes the openParentRoot
+// and openTempForRoot ctx checks then trips inside the first writerCtx.Write.
 func TestWriteReader_WriterToFastPath_CancelDuringWrite_NoLeak(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

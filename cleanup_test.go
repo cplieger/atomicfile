@@ -246,9 +246,8 @@ func TestCleanupStaleTemps_RemoveFailure_CountsAsFailed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	// Two candidates the sweep cannot unlink: both reach the caller as Failed,
-	// which is the number that says "orphans are accumulating and I could not
-	// reclaim them". It used to be reachable only through a Warn attribute.
+	// Both unreclaimable candidates must reach the caller as Failed: the number
+	// that says orphans are accumulating and could not be reclaimed.
 	h := &captureHandler{}
 	got, err := CleanupStaleTemps(t.Context(), dir, time.Hour, WithLogger(slog.New(h)))
 	if err != nil {
@@ -343,10 +342,8 @@ func TestIsAllDigits(t *testing.T) {
 
 // CleanupStaleTemps must never reclaim a non-regular entry that merely shares
 // the .atomicfile-<digits>.tmp shape (os.CreateTemp only makes regular files).
-// Pins the info.Mode().IsRegular() guard at cleanup.go:74 (added in the
-// per-concern split, previously hits=0). The dir is aged past the cutoff so the
-// ONLY thing sparing it is the non-regular skip, not the mtime guard; without
-// the guard os.Remove would rmdir the empty aged dir and removed would be 1.
+// The dir is aged past the cutoff so only the non-regular skip spares it, not
+// the mtime guard.
 func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -371,12 +368,9 @@ func TestCleanupStaleTemps_SkipsNonRegularTempNamedDir(t *testing.T) {
 	}
 }
 
-// The sweep reports its outcome and does NOT narrate it. Both counts reach the
-// caller in a SweepResult, so an aggregate Info/Warn summary would say the same
-// thing in a second voice — the reason CleanupStaleTempsInRoot never had one, and
-// the reason this one lost the two lines it used to emit when its own return value
-// could not carry the numbers. Per-entry Debug diagnostics stay: those are details
-// the counts cannot carry.
+// The sweep reports its outcome via SweepResult and does not also narrate it
+// with an aggregate Info/Warn line; per-entry Debug diagnostics stay, since
+// those carry details the counts cannot.
 func TestCleanupStaleTemps_ReportsCountsWithoutNarratingThem(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

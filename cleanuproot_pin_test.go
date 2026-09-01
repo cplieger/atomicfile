@@ -25,42 +25,32 @@ func writeAgedTemp(t *testing.T, dir, name string) string {
 }
 
 // TestReapStaleTempInRoot_refuses_an_ancestor_swapped_for_a_symlink pins the window the
-// pinned parent closes, which the leaf re-stat alone never covered.
+// pinned parent closes: an *os.Root confines a path but FOLLOWS an in-tree symlink
+// component, so stat-then-unlink on a multi-component name (Lstat(rel) then Remove(rel))
+// can be redirected, between those two lookups, at a different file inside the tree if an
+// ancestor directory is swapped for a symlink. The victim only needs a temp-shaped name.
 //
-// An *os.Root confines a path and deliberately FOLLOWS a symlink component that stays
-// inside it. The sweep's own contract is that it re-stats a candidate immediately before
-// unlinking it and "never follows a symlink left under a temp's name" — true of the LEAF
-// and, before the pin, false of every ancestor: Lstat(rel) and Remove(rel) are two
-// lookups of a multi-component name, so a directory component replaced with a symlink
-// between the walk that enumerated the entry and the unlink redirected BOTH at a
-// different file inside the tree. The victim only has to wear a temp-shaped name; the
-// sweep then deletes a file it never inspected and whose age it never checked.
+// The swap is staged where the race puts it: after the walk enumerates old/<temp> as a
+// regular file, before the reap runs.
 //
-// The swap here is staged where the race puts it: after the walk enumerated old/<temp> as
-// a regular file in a real directory, before the reap runs. Nothing outside the root is
-// involved, so this is not the confinement case the sweep already handled — it is a
-// redirection INSIDE the tree, which confinement alone permits.
-//
-// Red-green: against the pre-pin body (root.Lstat(rel) then root.Remove(rel)) the Lstat
-// resolves through the swapped ancestor, finds an aged regular file, and unlinks
-// live/<temp> — didRemove is true and the victim is gone. Both assertions below fail.
+// Red-green: against the pre-pin body (Lstat(rel) then Remove(rel)) the Lstat resolves
+// through the swapped ancestor and unlinks live/<temp> — both assertions below fail.
 func TestReapStaleTempInRoot_refuses_an_ancestor_swapped_for_a_symlink(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
 	const temp = ".atomicfile-1234512345.tmp"
 
-	// live/ is a directory the sweep never enumerated, holding a file that happens to
-	// wear a temp name (an interrupted write of another writer's, or a stale temp too
-	// young to reap — the sweep has no opinion on it because it never looked).
+	// live/ is a directory the sweep never enumerated, holding a file that
+	// happens to wear a temp name.
 	live := filepath.Join(dir, "live")
 	if err := os.Mkdir(live, 0o750); err != nil {
 		t.Fatalf("setup: Mkdir(live): %v", err)
 	}
 	victim := writeAgedTemp(t, live, temp)
 
-	// old/ is the directory the walk enumerated the candidate in. Both it and its temp
-	// go away, and a symlink to live/ takes its name: the state a co-mounting writer can
-	// stage in the window between the readdir and this reap.
+	// old/ is the directory the walk enumerated the candidate in; it and its
+	// temp are replaced by a symlink to live/, the state a co-mounting writer
+	// can stage between the readdir and this reap.
 	old := filepath.Join(dir, "old")
 	if err := os.Mkdir(old, 0o750); err != nil {
 		t.Fatalf("setup: Mkdir(old): %v", err)
@@ -98,11 +88,7 @@ func TestReapStaleTempInRoot_refuses_an_ancestor_swapped_for_a_symlink(t *testin
 
 // TestReapStaleTempInRoot_ignores_a_vanished_ancestor pins the benign half of the same
 // descent: a directory that disappeared with its temp between the walk and the reap is
-// the ordinary racing-deletion case (a co-mounting reaper, a renewal replacing a tree),
-// so it counts as neither a removal nor a failure.
-//
-// Without this split every such race would land in SweepResult.Failed and send an
-// operator looking for a permissions problem that does not exist.
+// an ordinary race and counts as neither a removal nor a failure.
 func TestReapStaleTempInRoot_ignores_a_vanished_ancestor(t *testing.T) {
 	t.Parallel()
 	root, _ := openTestRoot(t)
@@ -124,8 +110,7 @@ func TestReapStaleTempInRoot_ignores_a_vanished_ancestor(t *testing.T) {
 // TestCleanupStaleTempsInRoot_reaps_a_nested_temp_through_the_pin is the end-to-end half:
 // the pinned descent must not cost the recursive sweep its reach. A temp nested two
 // directories deep is still reclaimed, while a temp-shaped file under a SYMLINKED
-// directory is left alone — the walk never descends a symlink, so that file was never
-// enumerated and is not this sweep's to delete.
+// directory is left alone since the walk never descends a symlink.
 func TestCleanupStaleTempsInRoot_reaps_a_nested_temp_through_the_pin(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)

@@ -9,17 +9,11 @@ import (
 	"testing"
 )
 
-// A target already occupied by something that is not a regular file is refused
-// before anything is staged. Two of the three shapes here were previously
-// ACCEPTED or mis-reported:
-//
-//   - a FIFO, socket or device node was silently REPLACED by a regular file and
-//     the write reported Durable, because rename(2) overwrites any non-directory.
-//     A co-mounting writer could therefore get this package to destroy an object
-//     it never created — the same shape RemoveFileInRoot and ReadBoundedInRoot
-//     already refuse with ErrNotRegular.
-//   - a directory failed, but only at PhaseRename, after a complete staged write
-//     and both fsyncs, under a phase naming the wrong step.
+// A target already occupied by something that is not a regular file is
+// refused before anything is staged: a FIFO, socket or device node used to
+// be silently REPLACED (rename(2) overwrites any non-directory) and the
+// write reported Durable, and a directory used to fail only at
+// PhaseRename after a complete staged write and both fsyncs.
 func TestWriteTarget_RefusesANonRegularOccupant(t *testing.T) {
 	t.Parallel()
 
@@ -106,11 +100,10 @@ func TestWriteTarget_RefusesANonRegularOccupant(t *testing.T) {
 	})
 }
 
-// A name that cleans to something naming no ENTRY is refused up front rather than
-// at the rename. Before the shared check, WriteFileInRoot(root, "sub/..") staged a
-// temp, wrote it, chmod'ed it, fsynced it and closed it before failing at
-// PhaseRename with "file exists", while OpenParentInRoot refused the identical
-// name with ErrUnsafePath before touching the filesystem.
+// A name that cleans to something naming no ENTRY is refused up front rather
+// than at the rename. Before the shared check, WriteFileInRoot(root, "sub/..")
+// staged a temp, wrote it, chmod'ed it, fsynced it and closed it before
+// failing at PhaseRename with "file exists".
 func TestWriteTarget_RefusesANameThatNamesNoEntry(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{".", "..", "sub/..", "a/b/../.."} {
@@ -128,7 +121,6 @@ func TestWriteTarget_RefusesANameThatNamesNoEntry(t *testing.T) {
 		})
 	}
 
-	// The absolute-path family reaches the same check through the base name.
 	t.Run("root_of_the_filesystem", func(t *testing.T) {
 		t.Parallel()
 		if _, err := WriteFile(t.Context(), string(filepath.Separator), []byte("x")); !errors.Is(err, ErrUnsafePath) {
@@ -175,9 +167,9 @@ func TestValidateRootEntry(t *testing.T) {
 		})
 	}
 
-	// "." stays acceptable to validateRootName, because it is a legitimate
-	// DIRECTORY name inside a root and ProbeWritableInRoot documents taking it.
-	// Only the entry-shaped operations refuse it.
+	// "." stays acceptable to validateRootName: a legitimate DIRECTORY name
+	// inside a root, which ProbeWritableInRoot takes. Only the entry-shaped
+	// operations refuse it.
 	t.Run("validateRootName_still_accepts_dot", func(t *testing.T) {
 		t.Parallel()
 		if clean, err := validateRootName("."); err != nil || clean != "." {

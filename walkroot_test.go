@@ -13,9 +13,7 @@ import (
 	"time"
 )
 
-// collectWalk records what a WalkDirInRoot callback was handed, which is the whole
-// observable surface of the walk: which paths, in a set, and which of them arrived as a
-// failure.
+// collectWalk records what a WalkDirInRoot callback was handed.
 type collectWalk struct {
 	visited []string
 	failed  []string
@@ -29,10 +27,8 @@ func (c *collectWalk) visit(rel string, _ fs.DirEntry, err error) error {
 	return nil
 }
 
-// has reports whether rel was visited.
 func (c *collectWalk) has(rel string) bool { return slices.Contains(c.visited, rel) }
 
-// countVisits returns how many times rel was handed to the callback.
 func (c *collectWalk) countVisits(rel string) int {
 	n := 0
 	for _, got := range c.visited {
@@ -43,13 +39,9 @@ func (c *collectWalk) countVisits(rel string) int {
 	return n
 }
 
-// TestWalkDirInRoot_streams_a_directory_larger_than_one_batch pins the property the
-// batched read exists for: a directory bigger than one ReadDir batch must still be
-// enumerated completely and exactly once, at every depth.
-//
-// Batching is what keeps a large or hostile directory from being materialized (and
-// sorted) before the caller's callback can refuse anything, and it only helps if the
-// loop actually spans batches without dropping or repeating an entry.
+// TestWalkDirInRoot_streams_a_directory_larger_than_one_batch pins that a
+// directory bigger than one ReadDir batch is enumerated completely and
+// exactly once, at every depth.
 func TestWalkDirInRoot_streams_a_directory_larger_than_one_batch(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
@@ -74,7 +66,6 @@ func TestWalkDirInRoot_streams_a_directory_larger_than_one_batch(t *testing.T) {
 	if err := WalkDirInRoot(t.Context(), root, got.visit); err != nil {
 		t.Fatalf("WalkDirInRoot(tree spanning several read batches) = %v, want nil", err)
 	}
-	// The root, every flat entry, the nested directory, and everything inside it.
 	if want := 1 + flat + 1 + deep; len(got.visited) != want {
 		t.Errorf("WalkDirInRoot visited %d paths, want %d: a batched read must reach every entry of"+
 			" every directory exactly once", len(got.visited), want)
@@ -89,14 +80,9 @@ func TestWalkDirInRoot_streams_a_directory_larger_than_one_batch(t *testing.T) {
 	}
 }
 
-// TestWalkDirInRoot_does_not_descend_a_symlinked_directory pins the confinement half a
-// caller cannot see: a symlink to a directory is REPORTED as an entry and never entered,
-// so nothing under it is enumerated under a path that does not physically hold it.
-//
-// It matters most for a sweep: a walk that followed the link would report the same file
-// under two paths, and the second one is a path whose ancestors are not what they look
-// like — exactly the redirection OpenParentInRoot exists to refuse. Queuing on the
-// DIRENT type (never fs.Stat) is what buys it.
+// TestWalkDirInRoot_does_not_descend_a_symlinked_directory pins that a
+// symlink to a directory is reported as an entry and never entered: queuing
+// on the DIRENT type (never fs.Stat) is what buys it.
 func TestWalkDirInRoot_does_not_descend_a_symlinked_directory(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
@@ -128,21 +114,10 @@ func TestWalkDirInRoot_does_not_descend_a_symlinked_directory(t *testing.T) {
 	}
 }
 
-// TestWalkDirInRoot_refuses_a_fifo_in_a_directory_position pins the directory half of
-// the guarantee ReadBoundedInRoot gives every file: a reader-less FIFO must be REFUSED,
-// never waited on.
-//
-// The walk queues a subdirectory on the readdir dirent type, so a hostile occupant only
-// has to be swapped in between that readdir and the open — a window available to anything
-// with write access to a co-mounted tree. os.Root.Open is a plain O_RDONLY openat and
-// open(2) on a reader-less FIFO blocks forever, wedging the caller's goroutine for as
-// long as nobody opens the other end. O_DIRECTORY makes the kernel answer ENOTDIR first,
-// so the path is reported through the callback like any other directory the walk cannot
-// enter.
-//
-// The walk itself would never queue a FIFO, so streamDir is driven directly with its
-// path: that IS the state the race produces, a name an earlier readdir classified as a
-// directory.
+// TestWalkDirInRoot_refuses_a_fifo_in_a_directory_position pins that a
+// reader-less FIFO in a directory position is refused, never waited on:
+// os.Root.Open is a plain O_RDONLY openat and would block forever on a
+// reader-less FIFO, but O_DIRECTORY makes the kernel answer ENOTDIR first.
 func TestWalkDirInRoot_refuses_a_fifo_in_a_directory_position(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
@@ -176,11 +151,10 @@ func TestWalkDirInRoot_refuses_a_fifo_in_a_directory_position(t *testing.T) {
 	}
 }
 
-// TestWalkDirInRoot_reports_an_unreadable_directory_and_continues pins the two-level
-// error contract: a directory that cannot be opened is reported through the callback for
-// ITS OWN path, and a callback that answers nil keeps the walk running over the rest of
-// the tree. A partial enumeration is strictly better than none, and the callback is what
-// decides that.
+// TestWalkDirInRoot_reports_an_unreadable_directory_and_continues pins the
+// two-level error contract: an unopenable directory is reported through the
+// callback for ITS OWN path, and a callback answering nil keeps the walk
+// running over the rest of the tree.
 func TestWalkDirInRoot_reports_an_unreadable_directory_and_continues(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -213,9 +187,9 @@ func TestWalkDirInRoot_reports_an_unreadable_directory_and_continues(t *testing.
 	}
 }
 
-// twoSubdirTree builds a root holding two subdirectories, the second with one file in it,
-// so a walk that loses the first must still be able to reach the second. It returns the
-// root and the ambient path of the subdirectory a test is expected to remove.
+// twoSubdirTree builds a root holding two subdirectories, the second with one
+// file in it. It returns the root and the ambient path of the subdirectory a
+// test is expected to remove.
 func twoSubdirTree(t *testing.T) (root *os.Root, doomed string) {
 	t.Helper()
 	root, dir := openTestRoot(t)
@@ -231,17 +205,11 @@ func twoSubdirTree(t *testing.T) (root *os.Root, doomed string) {
 	return root, filepath.Join(dir, "a-dir")
 }
 
-// TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk pins the same
-// two-level error contract as the test above, through a failure the walk cannot avoid: a
-// subdirectory is queued by NAME and opened only after its parent's handle is closed, so
-// one removed in that window is reported through the callback for ITS OWN path, and a
-// callback that answers nil keeps the rest of the tree running.
-//
-// It is the witness that holds whatever UID the suite runs as. The permission fixture
-// above is skipped for root, which is what every container in this fleet runs as, so
-// without this the contract is unguarded exactly where it is measured. A directory that
-// disappears underneath the walk is also the likelier production shape: a co-mounting
-// writer reorganizing a tree while a sweep enumerates it.
+// TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk pins
+// the same two-level error contract through a failure that reaches even as
+// root, which the permission fixture above cannot: a subdirectory is queued
+// by NAME and opened only after its parent's handle is closed, so one
+// removed in that window is reported for ITS OWN path and the walk continues.
 func TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk(t *testing.T) {
 	t.Parallel()
 	root, doomed := twoSubdirTree(t)
@@ -271,11 +239,9 @@ func TestWalkDirInRoot_continues_past_a_directory_that_vanished_mid_walk(t *test
 	}
 }
 
-// TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure pins the other
-// half of that same decision. Whether an unenterable sub-path is fatal belongs to the
-// callback, so an error returned from the failure report ends the walk and reaches the
-// caller unchanged — a caller that treats a missed directory as fatal must not be handed
-// a nil error and a partial enumeration it cannot tell from a complete one.
+// TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure pins
+// the other half of that decision: an error returned from the failure report
+// ends the walk and reaches the caller unchanged.
 func TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure(t *testing.T) {
 	t.Parallel()
 	root, doomed := twoSubdirTree(t)
@@ -305,14 +271,11 @@ func TestWalkDirInRoot_aborts_when_the_callback_refuses_a_directory_failure(t *t
 	}
 }
 
-// TestWalkDirInRoot_honours_the_walk_sentinels pins that fs.SkipDir and fs.SkipAll mean
-// what they mean in fs.WalkDir. The callback type IS fs.WalkDirFunc, so a caller reusing
-// a visitor written for fs.WalkDir must not have its sentinel silently treated as a
-// fatal error (or, worse, ignored).
+// TestWalkDirInRoot_honours_the_walk_sentinels pins that fs.SkipDir and
+// fs.SkipAll mean what they mean in fs.WalkDir.
 func TestWalkDirInRoot_honours_the_walk_sentinels(t *testing.T) {
 	t.Parallel()
 
-	// A tree with two subdirectories, each holding one file, plus two files at the top.
 	setup := func(t *testing.T) *os.Root {
 		t.Helper()
 		root, dir := openTestRoot(t)
@@ -418,10 +381,8 @@ func TestWalkDirInRoot_honours_the_walk_sentinels(t *testing.T) {
 	})
 }
 
-// TestWalkDirInRoot_propagates_a_callback_error pins that a real error from the callback
-// — the shape every cancellation and every budget abort takes — stops the walk and
-// reaches the caller unchanged, so a caller cannot mistake an aborted enumeration for a
-// complete one.
+// TestWalkDirInRoot_propagates_a_callback_error pins that a real error from
+// the callback stops the walk and reaches the caller unchanged.
 func TestWalkDirInRoot_propagates_a_callback_error(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)
@@ -451,9 +412,8 @@ func TestWalkDirInRoot_propagates_a_callback_error(t *testing.T) {
 	}
 }
 
-// TestWalkDirInRoot_cancelled pins that an already-cancelled context does no work: the
-// callback is never called, so a walk started on the way out cannot traverse a large
-// tree while shutdown waits.
+// TestWalkDirInRoot_cancelled pins that an already-cancelled context does no
+// work: the callback is never called.
 func TestWalkDirInRoot_cancelled(t *testing.T) {
 	t.Parallel()
 	root, dir := openTestRoot(t)

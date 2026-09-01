@@ -100,10 +100,9 @@ func FuzzValidateAbsClean(f *testing.F) {
 	f.Add("/..")
 
 	f.Fuzz(func(t *testing.T, path string) {
-		// Encode the acceptance/rejection oracle for CURRENT behavior: reject
-		// empty and null-bearing inputs, reject anything that does not clean to
-		// an absolute path, and reject a cleaned path that still holds a ".."
-		// segment. Scanning segments of wantClean (not the raw input) tracks the
+		// Oracle for current behavior: reject empty/null-bearing input, anything
+		// that doesn't clean to an absolute path, or a cleaned path still
+		// holding "..". Scans wantClean, not the raw input, to track the
 		// production post-Clean traversal check.
 		wantErr := path == "" || strings.ContainsRune(path, 0)
 		wantClean := ""
@@ -195,11 +194,10 @@ func FuzzValidateRootName(f *testing.F) {
 	f.Add("nested/deep/file")
 
 	f.Fuzz(func(t *testing.T, name string) {
-		// Encode the acceptance/rejection oracle for CURRENT validateRootName
-		// behavior: reject empty, null-bearing, and absolute names; otherwise
-		// accept and return the cleaned relative form. An internal ".." that
-		// stays inside the tree is allowed (the *os.Root refuses escapes at
-		// operation time), so it is NOT a rejection here.
+		// Oracle for current validateRootName behavior: reject empty,
+		// null-bearing and absolute names, else accept the cleaned relative
+		// form. An internal ".." is allowed here since *os.Root refuses
+		// escapes at operation time.
 		wantErr := name == "" || strings.ContainsRune(name, 0) || filepath.IsAbs(name)
 		wantClean := filepath.Clean(name)
 

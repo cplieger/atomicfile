@@ -98,8 +98,7 @@ func TestReadBoundedFile(t *testing.T) {
 
 	t.Run("reads_through_os_root_handle", func(t *testing.T) {
 		t.Parallel()
-		// The intended seam: open the file through an *os.Root (which confines
-		// the path) and read it with ReadBoundedFile for identical bounds.
+		// The intended seam: open through an *os.Root, read with ReadBoundedFile.
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "in.pem"), []byte("rooted"), 0o644); err != nil {
 			t.Fatalf("seed: %v", err)

@@ -126,7 +126,6 @@ func ExampleWriteFileInRoot() {
 	// root's tree (Go 1.24+).
 	_, _ = atomicfile.WriteFileInRoot(context.Background(), root, "rooted.txt",
 		[]byte("confined"))
-	// Read it back through the same root with the bounded-read seam.
 	f, _ := root.Open("rooted.txt")
 	defer func() { _ = f.Close() }()
 	data, _ := atomicfile.ReadBoundedFile(context.Background(), f, 1<<20)

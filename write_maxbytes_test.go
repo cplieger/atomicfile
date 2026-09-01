@@ -23,8 +23,7 @@ func requireIntactTarget(t *testing.T, path, want string) {
 	}
 }
 
-// requireNoTemps asserts no temp file survived in dir: a rejected capped
-// write must not leak its staged temp.
+// requireNoTemps asserts no temp file survived in dir.
 func requireNoTemps(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -87,8 +86,8 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 		t.Fatalf("seed write: %v", err)
 	}
 
-	// iotest-style chunked reader without WriterTo: forces the generic
-	// io.Copy loop through the capping writer.
+	// A chunked reader without WriterTo forces the generic io.Copy loop
+	// through the capping writer.
 	over := io.LimitReader(neverEnding('x'), 100)
 	_, err := WriteReader(t.Context(), path, over, WithMaxBytes(64))
 	if !errors.Is(err, ErrFileTooLarge) {
@@ -108,24 +107,21 @@ func TestWriteReaderMaxBytes(t *testing.T) {
 	}
 	requireIntactTarget(t, path, previous)
 
-	// At-cap content passes.
 	if _, err := WriteReader(t.Context(), path, strings.NewReader("abcd"), WithMaxBytes(4)); err != nil {
 		t.Fatalf("at-cap WriteReader: %v", err)
 	}
 	requireIntactTarget(t, path, "abcd")
 }
 
-// TestWriteReaderMaxBytesReportsTheProjectedSize pins what the streaming cap's refusal
-// has to tell the caller: the size the file would have REACHED, not the size of the chunk
-// that crossed the line. The chunk is refused whole, so the caller's next question is
-// always "by how much am I over", and only the projected total answers it — a 4-byte
-// chunk refused against a 6-byte cap says nothing on its own about how full the file
-// already was.
+// TestWriteReaderMaxBytesReportsTheProjectedSize pins that the streaming
+// cap's refusal reports the size the file would have REACHED, not the size
+// of the crossing chunk: a caller's next question is always "by how much am
+// I over", and the chunk size alone does not answer it.
 func TestWriteReaderMaxBytesReportsTheProjectedSize(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "f.txt")
-	// Two 4-byte chunks against a 6-byte cap: the first is accepted, so the second is
-	// refused with 4 bytes already staged behind it.
+	// Two 4-byte chunks against a 6-byte cap: the first is accepted, so the
+	// second is refused with 4 bytes already staged behind it.
 	chunked := io.MultiReader(strings.NewReader("abcd"), strings.NewReader("efgh"))
 
 	_, err := WriteReader(t.Context(), path, chunked, WithMaxBytes(6))
@@ -189,9 +185,6 @@ func TestPendingFileMaxBytesRejectsWholeWrite(t *testing.T) {
 	if n != 0 || !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("crossing write = (%d, %v), want (0, ErrFileTooLarge)", n, err)
 	}
-	// The refusal reports the size the file would have REACHED — 5 already staged
-	// plus the 5 refused — because that is the number a caller needs to size its
-	// payload down to, and the chunk size alone does not carry it.
 	if want := "would grow the staged file to 10 bytes (max 8)"; !strings.Contains(err.Error(), want) {
 		t.Errorf("crossing write error = %q, want it to contain %q", err, want)
 	}
@@ -205,7 +198,6 @@ func TestPendingFileMaxBytesRejectsWholeWrite(t *testing.T) {
 	if fi.Size() != 5 {
 		t.Errorf("temp size = %d, want 5: no byte of the rejected write may land", fi.Size())
 	}
-	// The stream is still usable up to the cap.
 	if _, err := pf.Write([]byte("678")); err != nil {
 		t.Fatalf("write up to cap: %v", err)
 	}
@@ -232,8 +224,6 @@ func TestPendingFileMaxBytesStreamSurface(t *testing.T) {
 	if _, err := io.WriteString(pf, "abcde"); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("io.WriteString over cap = %v, want ErrFileTooLarge", err)
 	}
-	// io.Copy resolves to the ReadFrom override; the cap must hold on both
-	// the generic and the WriterTo source path.
 	if _, err := io.Copy(pf, io.LimitReader(neverEnding('z'), 100)); !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("io.Copy over cap = %v, want ErrFileTooLarge", err)
 	}
@@ -252,10 +242,8 @@ func TestPendingFileMaxBytesStreamSurface(t *testing.T) {
 }
 
 // TestPendingFileMaxBytesEncoderTruncateDance pins the driving consumer
-// shape (seadex-scout's state Save): a json.Encoder writes one buffer plus a
-// trailing newline into a pending file capped at limit+1, the newline is
-// truncated away, and the committed file is exactly the JSON size — while an
-// encoding one byte past the cap is rejected before any byte lands.
+// shape (a json.Encoder writing one buffer plus a trailing newline into a
+// pending file capped at limit+1, with the newline truncated away).
 func TestPendingFileMaxBytesEncoderTruncateDance(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -307,9 +295,8 @@ func TestPendingFileTruncateBeyondCapRejected(t *testing.T) {
 	}
 }
 
-// TestPendingFileUncappedTracksBytes pins that the accounting (and the
-// *os.File ReadFrom fast path) work without a cap: BytesWritten is
-// meaningful for every PendingFile, not only capped ones.
+// TestPendingFileUncappedTracksBytes pins that BytesWritten is meaningful
+// for every PendingFile, not only capped ones.
 func TestPendingFileUncappedTracksBytes(t *testing.T) {
 	t.Parallel()
 	pf, err := NewPendingFile(t.Context(), filepath.Join(t.TempDir(), "f.txt"))
@@ -329,8 +316,6 @@ func TestPendingFileUncappedTracksBytes(t *testing.T) {
 	if got := pf.BytesWritten(); got != 8 {
 		t.Errorf("BytesWritten = %d, want 8", got)
 	}
-	// An uncapped file truncates freely: the cap check has to mean "there is a cap AND
-	// this size exceeds it", so a file that never asked for one is never refused.
 	if err := pf.Truncate(5); err != nil {
 		t.Fatalf("Truncate(5) on an uncapped pending file = %v, want nil", err)
 	}
@@ -340,11 +325,10 @@ func TestPendingFileUncappedTracksBytes(t *testing.T) {
 }
 
 // TestPendingFileMaxBytesCommitBarrier pins the barrier-side backstop for
-// bytes staged outside the append-stream model: WriteAt and Write-after-Seek
-// (both through the embedded *os.File) and a reopen of the staged temp by
-// path all evade the streaming cap, so Commit re-verifies the staged file's
-// actual size against the WithMaxBytes cap and refuses to publish an
-// over-cap file. An exactly-at-cap staged size still publishes.
+// bytes staged outside the append-stream model: WriteAt, Write-after-Seek,
+// and a reopen of the staged temp by path all evade the streaming cap, so
+// Commit re-verifies the staged file's actual size. An exactly-at-cap
+// staged size still publishes.
 func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
 	t.Parallel()
 	const capBytes = 4
@@ -461,8 +445,7 @@ func TestPendingFileMaxBytesCommitBarrier(t *testing.T) {
 }
 
 // TestPendingFileInRootMaxBytesCommitBarrier pins that the commit-side cap
-// verification also holds for a root-confined PendingFile (the barrier is
-// shared; the entry point differs).
+// verification also holds for a root-confined PendingFile.
 func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -489,8 +472,7 @@ func TestPendingFileInRootMaxBytesCommitBarrier(t *testing.T) {
 }
 
 // TestPendingFileUncappedCommitIgnoresStagedSize pins that without a
-// WithMaxBytes cap the commit barrier performs no size check: out-of-stream
-// bytes publish fine.
+// WithMaxBytes cap the commit barrier performs no size check.
 func TestPendingFileUncappedCommitIgnoresStagedSize(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "f.txt")

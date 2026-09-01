@@ -198,9 +198,8 @@ func TestReadBounded_GrowsPastLimitDuringRead(t *testing.T) {
 	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
 		t.Skipf("Mkfifo unsupported: %v", err)
 	}
-	// A FIFO reports Size()==0 from Stat, so the pre-read size gate passes;
-	// the post-read length recheck is the only guard that can catch the
-	// overflow. A regular file of this size would be rejected earlier.
+	// A FIFO reports Size()==0 from Stat, so only the post-read length
+	// recheck can catch the overflow.
 	const limit = 8
 	payload := bytes.Repeat([]byte("x"), limit+4)
 	go func() {
@@ -216,8 +215,8 @@ func TestReadBounded_GrowsPastLimitDuringRead(t *testing.T) {
 	}
 }
 
-// ReadBounded checks ctx before the open and again after the stat. cancelAt=2
-// trips the post-stat guard (the open and stat succeed first).
+// cancelAt=2 trips the post-stat cancellation guard (the open and stat
+// succeed first).
 func TestReadBounded_CancelAfterStat(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

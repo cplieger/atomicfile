@@ -9,40 +9,23 @@ import (
 // a cache can answer "is what I loaded still what is on disk?" from a stat
 // alone, without re-reading the bytes.
 //
-// The correct form of that test is knowledge about this package's own write
-// barrier, which is why it lives here. Two different write mechanisms can
-// change a file's content, and each defeats one half of the naive check:
+// Matches compares mtime equality AND os.SameFile identity, and both legs are
+// load-bearing: an IN-PLACE writer keeps the same inode but may not advance
+// the mtime (inode times come from a coarse clock tick, so two writes inside
+// one tick can share an mtime), while a PUBLISH-BY-RENAME writer (every write
+// in this package) installs a different inode but can carry an OLD timestamp
+// forward (a backup restore, rsync -t). Neither leg alone catches both cases.
+// Size is a third leg this type does not hold: it is what catches an
+// in-place rewrite that changes the file's LENGTH without advancing its
+// mtime; a caller whose file may be rewritten in place should keep its own
+// size comparison beside Changed.
 //
-//   - An IN-PLACE writer (a plain os.WriteFile, an editor, a truncate-and-write)
-//     keeps the same inode and USUALLY moves the mtime forward — usually,
-//     because inode times come from a coarse clock tick, so two writes inside
-//     one tick carry byte-identical mtimes. Comparing identity alone would
-//     call that unchanged.
-//   - A PUBLISH-BY-RENAME writer — every write in this package — installs a
-//     DIFFERENT inode. Normally its mtime differs too, but it need not: a
-//     backup restore, an rsync with -t, a tar extract with -p, or any
-//     re-publication of an archived generation lands new content carrying the
-//     OLD timestamp. Comparing mtime alone would call that unchanged, and the
-//     stale copy would then be served until something else happened to touch
-//     the file.
+// The zero value records nothing, which reports Changed — the fail direction
+// a cache wants, since a spurious reload costs one read while a missed
+// reload serves stale data indefinitely.
 //
-// So Matches compares mtime equality AND os.SameFile identity, and both legs
-// are load-bearing. Size is a THIRD leg, which this type does not hold and
-// which is not redundant: it is what catches an in-place rewrite that changed
-// the file's LENGTH without advancing its mtime, and neither leg above sees
-// that. mtime AND SameFile AND size strictly dominates either two-leg form, so
-// a caller whose file may be rewritten in place keeps its own size comparison
-// beside Changed, while one reading a file only this package publishes needs no
-// third leg. Nothing stat-based catches an in-place rewrite of equal length
-// inside one tick.
-//
-// The zero value records nothing, which reports Changed — the fail direction a
-// cache wants, since a spurious reload costs one read while a missed reload
-// serves stale data indefinitely.
-//
-// FileIdentity retains the os.FileInfo it was given. It is a comparison
-// primitive, not a policy: what to do about a changed file, whether a stat
-// error is fatal, and when to re-stat at all stay with the caller.
+// FileIdentity is a comparison primitive, not a policy: what to do about a
+// changed file, and when to re-stat, stay with the caller.
 type FileIdentity struct {
 	info os.FileInfo
 }
@@ -75,9 +58,8 @@ func (id FileIdentity) Matches(info os.FileInfo) bool {
 func (id FileIdentity) Changed(info os.FileInfo) bool { return !id.Matches(info) }
 
 // ModTime returns the captured modification time, or the zero Time when
-// nothing was recorded. It is exposed for diagnostics — a log line or an
-// assertion naming which generation is held — not for the freshness test, which
-// Matches owns because the mtime alone is not sufficient.
+// nothing was recorded. For diagnostics only; Matches owns the freshness
+// test, since mtime alone is not sufficient.
 func (id FileIdentity) ModTime() time.Time {
 	if id.info == nil {
 		return time.Time{}

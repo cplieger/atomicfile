@@ -179,15 +179,10 @@ func TestPendingFile_ConcurrentSamePath(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// TestPendingFile_CleanupLogsNothingWhenNothingFails pins that the pending file's two
-// best-effort teardown diagnostics are failure-only. Cleanup cannot return either failure
-// — the temp's close and, for a PendingFile that opened its own parent root, that root's
-// close, both of which happen after the caller's last decision point — so each one is
-// reported at Debug instead.
-//
-// A line emitted on the SUCCESS path inverts what the line means: a caller running at
-// Debug then reads "close failed" once per clean write it makes, and the record that was
-// meant to name a real leak becomes the one nobody looks at.
+// TestPendingFile_CleanupLogsNothingWhenNothingFails pins that the pending
+// file's two best-effort teardown diagnostics are failure-only, so a line
+// emitted on the SUCCESS path would mean a caller running at Debug reads
+// "close failed" on every clean write.
 func TestPendingFile_CleanupLogsNothingWhenNothingFails(t *testing.T) {
 	t.Parallel()
 	h := &captureHandler{}
@@ -285,7 +280,6 @@ func TestPendingFile_AbandonedLeak(t *testing.T) {
 	}
 	tmpName := pf.Name()
 
-	// An abandoned PendingFile keeps its temp until Cleanup/Commit.
 	if _, err := os.Stat(tmpName); err != nil {
 		t.Fatalf("temp file should still exist when abandoned: %v", err)
 	}
@@ -331,7 +325,7 @@ func TestPendingFile_CleanupThenCommit_ReturnsAborted(t *testing.T) {
 		t.Fatalf("Cleanup: %v", err)
 	}
 	// Commit after Cleanup must report ErrAborted, not a false zero-Result
-	// success: the temp was already removed, so nothing reached the final path.
+	// success.
 	res, commitErr := pf.Commit(t.Context())
 	if !errors.Is(commitErr, ErrAborted) {
 		t.Fatalf("Commit after Cleanup = %v, want ErrAborted", commitErr)
@@ -344,8 +338,8 @@ func TestPendingFile_CleanupThenCommit_ReturnsAborted(t *testing.T) {
 	}
 }
 
-// After a successful Commit, Cleanup must be a no-op that does NOT remove the
-// committed file, and a later Commit still replays the original result.
+// After a successful Commit, Cleanup must be a no-op that does NOT remove
+// the committed file, and a later Commit still replays the original result.
 func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -364,7 +358,7 @@ func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 	if err := pf.Cleanup(); err != nil {
 		t.Fatalf("Cleanup after Commit should be a no-op: %v", err)
 	}
-	assertContent(t, path, "kept") // Cleanup must not remove the committed file
+	assertContent(t, path, "kept")
 	again, err := pf.Commit(t.Context())
 	if err != nil {
 		t.Fatalf("Commit after a no-op Cleanup: %v", err)
@@ -375,11 +369,10 @@ func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 }
 
 // A failed Commit lands in the committed state with a cached *WriteError; a
-// second Commit must replay that identical error value (not nil, not ErrAborted,
-// not a fresh error) and the same zero Result, without re-running the barrier or
-// leaking a temp. Closing the embedded fd makes the barrier's first step (Chmod)
-// fail, so this also pins the PhaseTempChmod tag and the on-barrier-failure temp
-// cleanup.
+// second Commit must replay that identical error value and the same zero
+// Result, without re-running the barrier or leaking a temp. Closing the
+// embedded fd makes the barrier's first step (Chmod) fail, so this also
+// pins the PhaseTempChmod tag and the on-barrier-failure temp cleanup.
 func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -421,12 +414,10 @@ func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// The rename-failure branch, reached the only way that survives the pre-write
-// target guard: the guard runs at construction and the rename runs at Commit, so
-// planting a directory at the target in between exercises exactly the race the
-// guard cannot close (rename(2) has no "only if the destination is a regular
-// file" mode). The first Commit must tag PhaseRename and clean the temp; a second
-// Commit must replay the same cached error.
+// The rename-failure branch, reached the only way that survives the
+// pre-write target guard: the guard runs at construction and the rename
+// runs at Commit, so planting a directory at the target in between
+// exercises the race the guard cannot close.
 func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -440,8 +431,7 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	// Now occupy the target with a NON-EMPTY directory, which makes rename fail
-	// with ENOTEMPTY on every platform without a test seam.
+	// Occupy the target with a NON-EMPTY directory: ENOTEMPTY on every platform.
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
@@ -463,9 +453,8 @@ func TestPendingFile_Commit_RenameFailure_TaggedAndReplays(t *testing.T) {
 }
 
 // Cleanup must be best-effort on a close failure: a pre-closed fd makes the
-// internal p.Close() in Cleanup return os.ErrClosed (logged at Debug), which
-// Cleanup MUST swallow and still remove the temp and return nil. A return-clErr
-// regression would leak the temp.
+// internal p.Close() in Cleanup return os.ErrClosed, which Cleanup MUST
+// swallow and still remove the temp and return nil.
 func TestPendingFile_Cleanup_CloseFailure_StillRemovesTemp(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -480,8 +469,8 @@ func TestPendingFile_Cleanup_CloseFailure_StillRemovesTemp(t *testing.T) {
 	}
 	tmpName := pf.Name()
 
-	// First Close succeeds and leaves state pendingOpen + the temp on disk;
-	// the internal p.Close() call is then a second close -> os.ErrClosed.
+	// First Close succeeds; the internal p.Close() call is then a second
+	// close -> os.ErrClosed.
 	if err := pf.Close(); err != nil {
 		t.Fatalf("File.Close: %v", err)
 	}
@@ -495,11 +484,9 @@ func TestPendingFile_Cleanup_CloseFailure_StillRemovesTemp(t *testing.T) {
 	assertNoTempLeak(t, dir)
 }
 
-// TestPendingFile_Cleanup_RemoveFailureSurfacesError pins that
-// (*PendingFile).Cleanup surfaces a temp-removal failure (other than
-// ErrNotExist) as a non-nil error. Replacing the temp with a NON-EMPTY
-// directory triggers ENOTEMPTY, which root cannot bypass, so the assertion holds
-// even when the suite runs as root.
+// TestPendingFile_Cleanup_RemoveFailureSurfacesError pins that Cleanup
+// surfaces a temp-removal failure (other than ErrNotExist) as a non-nil
+// error. A non-empty directory triggers ENOTEMPTY, which root cannot bypass.
 func TestPendingFile_Cleanup_RemoveFailureSurfacesError(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.txt")
@@ -510,8 +497,6 @@ func TestPendingFile_Cleanup_RemoveFailureSurfacesError(t *testing.T) {
 	}
 	tmpName := pf.Name()
 
-	// Swap the temp file for a non-empty directory at the same path so
-	// Cleanup's os.Remove(tmpName) fails with ENOTEMPTY.
 	replaceWithNonEmptyDir(t, tmpName)
 
 	gotErr := pf.Cleanup()
@@ -543,14 +528,11 @@ func TestPendingFile_Cleanup_SuccessReturnsNil(t *testing.T) {
 	}
 }
 
-// TestPendingFile_Cleanup_RetriesAfterRemoveFailure pins the pendingCleanupFailed
-// retry semantics: when the first Cleanup's os.Remove fails (ENOTEMPTY), Cleanup
-// returns the error and does NOT falsely mark the write cleaned, so Commit still
-// aborts and a later Cleanup retries the removal once the obstruction clears. A
-// regression to the old "mark cleaned before remove" behavior would make the
-// second Cleanup a silent no-op and leak the temp. Replacing the temp with a
-// NON-EMPTY directory triggers ENOTEMPTY, which root cannot bypass, so this holds
-// even when the suite runs as root.
+// TestPendingFile_Cleanup_RetriesAfterRemoveFailure pins the
+// pendingCleanupFailed retry semantics: a failed Cleanup does NOT mark the
+// write cleaned, so Commit still aborts and a later Cleanup retries once the
+// obstruction clears. A non-empty directory triggers ENOTEMPTY, which root
+// cannot bypass.
 func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "retry.txt")
@@ -561,7 +543,6 @@ func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 	}
 	tmpName := pf.Name()
 
-	// Swap the temp for a non-empty directory so the first os.Remove fails.
 	replaceWithNonEmptyDir(t, tmpName)
 
 	firstErr := pf.Cleanup()
@@ -572,15 +553,10 @@ func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 		t.Fatalf("first Cleanup = %v, want a non-ErrNotExist error (ENOTEMPTY expected)", firstErr)
 	}
 
-	// A failed Cleanup must NOT falsely mark the write cleaned: Commit still
-	// aborts because nothing reached the final path.
 	if _, commitErr := pf.Commit(t.Context()); !errors.Is(commitErr, ErrAborted) {
 		t.Fatalf("Commit after a failed Cleanup = %v, want ErrAborted", commitErr)
 	}
 
-	// Clearing the obstruction lets a second Cleanup retry the removal and
-	// succeed. The old (mark-cleaned-before-remove) behavior would make this a
-	// silent no-op and leak the directory left at tmpName.
 	if err := os.Remove(filepath.Join(tmpName, "child")); err != nil {
 		t.Fatalf("clear obstruction: %v", err)
 	}
@@ -592,15 +568,10 @@ func TestPendingFile_Cleanup_RetriesAfterRemoveFailure(t *testing.T) {
 	}
 }
 
-// TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure pins
-// the retry-failure branch of the pendingCleanupFailed state: a first Cleanup
-// fails (ENOTEMPTY), a SECOND Cleanup while the temp is still obstructed also
-// fails and MUST keep the write in a retryable (not falsely-cleaned) state, so
-// Commit still aborts; only after the obstruction clears does a third Cleanup
-// succeed and remove the temp. A regression that marks the write cleaned on the
-// second failed removal would make the third Cleanup a silent no-op and leak the
-// temp directory. Replacing the temp with a NON-EMPTY directory triggers
-// ENOTEMPTY, which root cannot bypass, so this holds even when run as root.
+// TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure
+// pins that a second failed removal also keeps the retryable state, so a
+// third Cleanup (after the obstruction clears) still succeeds. A non-empty
+// directory triggers ENOTEMPTY, which root cannot bypass.
 func TestPendingFile_Cleanup_RetryKeepsRetryableStateAfterSecondRemoveFailure(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "retry-still-blocked.txt")
