@@ -1,6 +1,10 @@
 package atomicfile
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"os"
+)
 
 var (
 	// ErrEmptyPath is returned when a path argument is empty.
@@ -13,12 +17,19 @@ var (
 	// errors.Is).
 	ErrFileTooLarge = errors.New("atomicfile: file too large")
 	// ErrSymlinkTarget is returned when the target path is a symlink, which
-	// every write entry point and OpenRegular refuse.
+	// every write entry point, OpenRegular and OpenRegularInRootNoFollow refuse.
 	ErrSymlinkTarget = errors.New("atomicfile: target is a symlink")
+	// ErrRaced is returned by OpenRegularInRootNoFollow when the name changed
+	// identity between the check that refused a symlink and the open that
+	// followed it, so the refusal could not be shown to cover the descriptor
+	// handed back. A retry is the sane response, unlike ErrSymlinkTarget, which
+	// is a permanent verdict about what is at the name. Match with errors.Is.
+	ErrRaced = errors.New("atomicfile: path changed between the check and the open")
 	// ErrNotRegular is returned when a name resolves to something other than a
 	// regular file. ReadBoundedInRoot refuses to read it, RemoveFileInRoot
 	// refuses to unlink it, and every write entry point refuses to publish over
-	// it. Match with errors.Is.
+	// it. Match with errors.Is; for the mode itself, errors.As a
+	// *NotRegularError rather than parsing the message.
 	ErrNotRegular = errors.New("atomicfile: not a regular file")
 	// ErrNotDirectory is returned by EnsurePrivateDir when the name is occupied
 	// by something other than a directory. Match with errors.Is.
@@ -90,3 +101,32 @@ type WriteError struct {
 
 func (e *WriteError) Error() string { return "atomicfile: " + e.Phase.String() + ": " + e.Err.Error() }
 func (e *WriteError) Unwrap() error { return e.Err }
+
+// NotRegularError reports that a name resolved to something other than a
+// regular file, and carries the mode that decided it.
+//
+// The mode is a DIAGNOSTIC a caller reports, and reading it out of a message
+// string is not something a caller should have to do. Every producer here
+// returns one, so a caller resolving a name once never has to stat the path a
+// second time just to describe a refusal. It unwraps to ErrNotRegular, so
+// errors.Is keeps matching for callers that only need the verdict.
+type NotRegularError struct {
+	// Name is the path or root-relative name as the caller supplied it, cleaned.
+	Name string
+	// Mode is the full FileMode of what was actually there. Type() names the
+	// kind; the permission bits are kept because a caller reporting an
+	// unexpected object usually wants both.
+	Mode os.FileMode
+}
+
+func (e *NotRegularError) Error() string {
+	return fmt.Sprintf("%s: %s (type %s)", ErrNotRegular.Error(), e.Name, e.Mode.Type())
+}
+
+func (e *NotRegularError) Unwrap() error { return ErrNotRegular }
+
+// notRegular is the one producer, so the three refusal sites cannot drift in
+// what they report.
+func notRegular(name string, mode os.FileMode) error {
+	return &NotRegularError{Name: name, Mode: mode}
+}
