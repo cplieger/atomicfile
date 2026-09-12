@@ -464,3 +464,163 @@ func assertRefusesFIFO(t *testing.T, open func() (*os.File, os.FileInfo, error))
 		t.Fatal("open blocked on a FIFO; the open must be non-blocking")
 	}
 }
+
+func TestOpenRegularInRootNoFollow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("opens_a_regular_file_like_its_sibling", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "in.pem"), []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		root := openTestRoot(t, dir)
+
+		f, fi, err := atomicfile.OpenRegularInRootNoFollow(root, "in.pem")
+		if err != nil {
+			t.Fatalf("OpenRegularInRootNoFollow = %v, want nil", err)
+		}
+		defer f.Close()
+
+		if !fi.Mode().IsRegular() {
+			t.Errorf("FileInfo mode = %s, want a regular file", fi.Mode())
+		}
+		got, err := atomicfile.ReadBoundedFile(t.Context(), f, 1024)
+		if err != nil {
+			t.Fatalf("ReadBoundedFile = %v, want nil", err)
+		}
+		if string(got) != "payload" {
+			t.Errorf("read %q, want %q", got, "payload")
+		}
+	})
+
+	// The whole reason the function exists, and the assertion that would have
+	// caught an O_NOFOLLOW-only implementation: os.Root resolves an in-root
+	// symlink itself, so the flag is inert and only an Lstat answer refuses.
+	t.Run("refuses_an_in_root_symlink_the_sibling_follows", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "real"), []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real", filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		root := openTestRoot(t, dir)
+
+		if _, _, err := atomicfile.OpenRegularInRootNoFollow(root, "link"); !errors.Is(err, atomicfile.ErrSymlinkTarget) {
+			t.Errorf("NoFollow on a symlink = %v, want ErrSymlinkTarget", err)
+		}
+		// The sibling's behaviour is unchanged, which is what makes this an
+		// addition rather than a default flip: a caller depending on the
+		// resolution keeps getting it.
+		f, _, err := atomicfile.OpenRegularInRoot(root, "link")
+		if err != nil {
+			t.Fatalf("OpenRegularInRoot on the same symlink = %v, want nil (it follows by design)", err)
+		}
+		f.Close()
+	})
+
+	t.Run("refuses_a_directory_with_the_mode_in_a_typed_error", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "sub"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		root := openTestRoot(t, dir)
+
+		_, _, err := atomicfile.OpenRegularInRootNoFollow(root, "sub")
+		if !errors.Is(err, atomicfile.ErrNotRegular) {
+			t.Fatalf("NoFollow on a directory = %v, want ErrNotRegular", err)
+		}
+		var nre *atomicfile.NotRegularError
+		if !errors.As(err, &nre) {
+			t.Fatalf("err = %v, want a *NotRegularError a caller can read the mode from", err)
+		}
+		if !nre.Mode.IsDir() {
+			t.Errorf("NotRegularError.Mode = %s, want a directory mode", nre.Mode)
+		}
+		if nre.Name != "sub" {
+			t.Errorf("NotRegularError.Name = %q, want %q", nre.Name, "sub")
+		}
+	})
+
+	t.Run("a_missing_file_is_the_roots_own_error", func(t *testing.T) {
+		t.Parallel()
+		root := openTestRoot(t, t.TempDir())
+		if _, _, err := atomicfile.OpenRegularInRootNoFollow(root, "absent"); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("NoFollow on a missing name = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("refuses_an_absolute_name", func(t *testing.T) {
+		t.Parallel()
+		root := openTestRoot(t, t.TempDir())
+		if _, _, err := atomicfile.OpenRegularInRootNoFollow(root, "/etc/passwd"); !errors.Is(err, atomicfile.ErrUnsafePath) {
+			t.Errorf("NoFollow on an absolute name = %v, want ErrUnsafePath", err)
+		}
+	})
+
+	t.Run("a_nil_root_is_refused", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := atomicfile.OpenRegularInRootNoFollow(nil, "x"); err == nil {
+			t.Error("NoFollow with a nil root = nil, want an error")
+		}
+	})
+}
+
+// TestNotRegularError_EveryProducerCarriesTheMode holds the typed error across
+// all three refusal sites, so a later site cannot go back to a bare sentinel
+// and silently cost callers the diagnostic.
+func TestNotRegularError_EveryProducerCarriesTheMode(t *testing.T) {
+	t.Parallel()
+
+	newFIFO := func(t *testing.T, dir, name string) {
+		t.Helper()
+		if err := syscall.Mkfifo(filepath.Join(dir, name), 0o600); err != nil {
+			t.Skipf("mkfifo unavailable: %v", err)
+		}
+	}
+
+	t.Run("read_side", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		newFIFO(t, dir, "pipe")
+		root := openTestRoot(t, dir)
+
+		_, err := atomicfile.ReadBoundedInRoot(t.Context(), root, "pipe", 16)
+		var nre *atomicfile.NotRegularError
+		if !errors.As(err, &nre) || nre.Mode.Type()&os.ModeNamedPipe == 0 {
+			t.Errorf("read of a FIFO = %v, want a *NotRegularError naming a pipe", err)
+		}
+	})
+
+	t.Run("remove_side", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		newFIFO(t, dir, "pipe")
+		root := openTestRoot(t, dir)
+
+		err := atomicfile.RemoveFileInRoot(root, "pipe")
+		var nre *atomicfile.NotRegularError
+		if !errors.As(err, &nre) || nre.Mode.Type()&os.ModeNamedPipe == 0 {
+			t.Errorf("remove of a FIFO = %v, want a *NotRegularError naming a pipe", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, "pipe")); statErr != nil {
+			t.Error("the refused FIFO was removed anyway")
+		}
+	})
+
+	t.Run("write_side", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		newFIFO(t, dir, "pipe")
+		root := openTestRoot(t, dir)
+
+		_, err := atomicfile.WriteFileInRoot(t.Context(), root, "pipe", []byte("x"))
+		var nre *atomicfile.NotRegularError
+		if !errors.As(err, &nre) || nre.Mode.Type()&os.ModeNamedPipe == 0 {
+			t.Errorf("write over a FIFO = %v, want a *NotRegularError naming a pipe", err)
+		}
+	})
+}

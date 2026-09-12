@@ -109,7 +109,71 @@ func statRegular(f *os.File, name string) (os.FileInfo, error) {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s (type %s)", ErrNotRegular, name, fi.Mode().Type())
+		return nil, notRegular(name, fi.Mode())
 	}
 	return fi, nil
+}
+
+// OpenRegularInRootNoFollow is OpenRegularInRoot with the opposite link
+// policy: it REFUSES a symlink at the final component instead of resolving it.
+// Same returns and same ownership, and the same ErrNotRegular verdict for a
+// directory, FIFO, device node or socket.
+//
+// A second function rather than an option on the first, because the permissive
+// answer must not be reachable by omission: a policy type has a zero value, and
+// a zero value meaning "follow" is a guarantee lost by forgetting a field.
+//
+// O_NOFOLLOW IS NOT THE MECHANISM, measured rather than assumed: os.Root
+// resolves in-root symlinks itself before opening the final component, so the
+// flag is silently inert through Root.OpenFile (go1.27.1 — the symlink opens
+// and yields the target's bytes with it set). Root.Lstat's answer is the
+// refusal instead, and the descriptor's identity is confirmed against it so a
+// name repointed in between is ErrRaced rather than passed off as the file that
+// was checked. A hard link to the same inode compares equal, correctly.
+//
+// Errors: ErrEmptyPath or ErrUnsafePath for an empty, NUL-holding or absolute
+// name; ErrSymlinkTarget for a symlink; ErrRaced for a mid-sequence change;
+// *NotRegularError (matching ErrNotRegular) carrying the mode; the root's own
+// error otherwise. Like its sibling it does not pin the ANCESTOR components —
+// OpenParentInRoot is the primitive for that.
+func OpenRegularInRootNoFollow(root *os.Root, name string) (*os.File, os.FileInfo, error) {
+	if root == nil {
+		return nil, nil, errors.New("atomicfile: nil root")
+	}
+	clean, err := validateRootName(name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	before, err := root.Lstat(clean)
+	if err != nil {
+		return nil, nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("%w: %s", ErrSymlinkTarget, clean)
+	}
+
+	// O_NONBLOCK for the same reason as the sibling: a FIFO that slipped in
+	// between the Lstat and here is a rejection rather than a hang.
+	f, err := root.OpenFile(clean, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	// Identity BEFORE kind: a name swapped for a directory is more honestly
+	// reported as a race than as "not a regular file", because the caller's
+	// question was about the object it checked.
+	if !os.SameFile(before, fi) {
+		_ = f.Close()
+		return nil, nil, fmt.Errorf("%w: %s", ErrRaced, clean)
+	}
+	if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, nil, notRegular(clean, fi.Mode())
+	}
+	return f, fi, nil
 }

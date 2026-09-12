@@ -76,7 +76,7 @@ func RemoveFileInRoot(root *os.Root, name string) error {
 		return err
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s (type %s)", ErrNotRegular, name, fi.Mode().Type())
+		return notRegular(name, fi.Mode())
 	}
 	return parent.Remove(base)
 }

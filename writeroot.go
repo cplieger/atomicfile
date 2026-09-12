@@ -126,7 +126,7 @@ func checkWriteTargetInRoot(root *os.Root, name string) error {
 	case fi.Mode()&os.ModeSymlink != 0:
 		return fmt.Errorf("%w: %s", ErrSymlinkTarget, name)
 	case !fi.Mode().IsRegular():
-		return fmt.Errorf("%w: %s (type %s)", ErrNotRegular, name, fi.Mode().Type())
+		return notRegular(name, fi.Mode())
 	}
 	return nil
 }
