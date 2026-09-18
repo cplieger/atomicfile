@@ -1,8 +1,6 @@
 # atomicfile
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v3.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v3)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v3.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v3) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
 
 > Crash-safe atomic file writes for Go
 
