@@ -116,7 +116,7 @@ func TestWriteFile(t *testing.T) {
 	})
 
 	// A missing parent without WithMkdirMode must fail with PhaseTempCreate:
-	// vibekit's transient-failure classification branches on exactly this
+	// marotte's transient-failure classification branches on exactly this
 	// phase.
 	t.Run("missing_parent_is_PhaseTempCreate_without_mkdir", func(t *testing.T) {
 		t.Parallel()
