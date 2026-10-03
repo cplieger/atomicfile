@@ -77,6 +77,10 @@ func EnforceMode(f *os.File, want os.FileMode) (os.FileMode, error) {
 	return stored, nil
 }
 
+// enforceMode is the write path's EnforceMode. It is a package var so tests
+// can stand in for a filesystem that refuses a mode.
+var enforceMode = EnforceMode
+
 // chmodBits reduces a mode to the bits chmod(2) can set: permission bits
 // plus setuid, setgid and sticky. Strips the type bits so a file and a
 // directory compare meaningfully.

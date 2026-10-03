@@ -10,6 +10,7 @@ type cfg struct {
 	maxBytes       int64
 	mode           os.FileMode
 	mkdirMode      os.FileMode
+	modeSet        bool
 	recursive      bool
 	repairOwnedDir bool
 }
@@ -55,23 +56,26 @@ func WithRecursive(recursive bool) Option {
 	return func(c *cfg) { c.recursive = recursive }
 }
 
-// WithMode sets the permission applied to the written file. Defaults to 0o644.
+// WithMode makes mode a guarantee: the staging file is created and proved
+// owner-only before any data is written, and the final file is proved to
+// hold mode, or the write fails matching ErrModeNotStored. Last call wins.
+//
+// Without it the file is ordinary: created like os.Create (0666 through the
+// umask and inherited ACLs) and never chmod'ed or checked. Pass it for any
+// file whose readers must be restricted.
 func WithMode(mode os.FileMode) Option {
-	return func(c *cfg) { c.mode = mode }
+	return func(c *cfg) {
+		c.mode = mode
+		c.modeSet = true
+	}
 }
 
-// WithMkdirMode creates the parent directory (and any missing ancestors) with
-// the given permission before writing; without it a missing parent is an
-// error. Applies to every write entry point; sweeps and EnsurePrivateDir
-// ignore it.
-//
-// The mode is ENFORCED on each created directory, not merely requested:
-// mkdir(2) passes it through umask, and measured under umask 077 a requested
-// 0o755 stored 0o700. A filesystem that won't store the mode fails the write
-// with ErrModeNotStored. A PRE-EXISTING directory is never chmod'ed.
-//
-// Each created directory's parent is fsynced as it is made; Result.Durable is
-// false if any of those fsyncs failed, but the write still succeeds.
+// WithMkdirMode creates missing parent directories at mode before writing;
+// without it a missing parent is an error. The mode is enforced on each
+// created directory (a pre-existing one is never chmod'ed), or the write
+// fails with ErrModeNotStored. It governs directories only; the file's mode
+// is WithMode's. Sweeps and EnsurePrivateDir ignore it. Result.Durable is
+// false if a created directory's parent fsync failed.
 func WithMkdirMode(mode os.FileMode) Option {
 	return func(c *cfg) { c.mkdirMode = mode }
 }
@@ -93,7 +97,7 @@ func WithMaxBytes(n int64) Option {
 }
 
 func buildCfg(opts []Option) *cfg {
-	c := &cfg{mode: 0o644}
+	c := &cfg{}
 	for _, o := range opts {
 		if o != nil {
 			o(c)

@@ -63,7 +63,8 @@ const (
 	PhaseTempCreate WritePhase = iota + 1
 	// PhaseTempWrite indicates failure writing to the temp file.
 	PhaseTempWrite
-	// PhaseTempChmod indicates failure setting permissions on the temp file.
+	// PhaseTempChmod indicates failure enforcing WithMode's mode on the temp
+	// file; it occurs only under WithMode.
 	PhaseTempChmod
 	// PhaseTempSync indicates failure syncing the temp file.
 	PhaseTempSync

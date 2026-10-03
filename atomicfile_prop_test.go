@@ -10,20 +10,38 @@ import (
 	"pgregory.net/rapid"
 )
 
-// WriteFile must round-trip arbitrary byte payloads and arbitrary valid modes,
-// leaving no temp artifact behind on success.
+// WriteFile must round-trip arbitrary byte payloads with or without WithMode,
+// publish an enforced mode exactly and an ordinary file within 0666, and
+// leave no temp artifact behind on success.
 func TestWriteFile_RapidRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	var counter int
 	rapid.Check(t, func(t *rapid.T) {
 		data := rapid.SliceOf(rapid.Byte()).Draw(t, "data")
+		modeSet := rapid.Bool().Draw(t, "modeSet")
 		mode := rapid.SampledFrom([]os.FileMode{0o600, 0o644, 0o755}).Draw(t, "mode")
 
 		counter++
 		path := filepath.Join(dir, fmt.Sprintf("testfile-%d", counter))
 
-		if _, err := WriteFile(t.Context(), path, data, WithMode(mode)); err != nil {
+		var opts []Option
+		if modeSet {
+			opts = append(opts, WithMode(mode))
+		}
+		if _, err := WriteFile(t.Context(), path, data, opts...); err != nil {
 			t.Fatalf("WriteFile: %v", err)
+		}
+
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		perm := fi.Mode().Perm()
+		if modeSet && perm != mode {
+			t.Fatalf("WriteFile(WithMode(%#o)) published mode %#o", mode, perm)
+		}
+		if !modeSet && perm&^0o666 != 0 {
+			t.Fatalf("WriteFile without WithMode published mode %#o, want no bits beyond 0666", perm)
 		}
 
 		got, err := os.ReadFile(path)

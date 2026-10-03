@@ -66,27 +66,24 @@ func randomTempName() string {
 	return tempPrefix + strconv.FormatUint(binary.LittleEndian.Uint64(b[:]), 10) + tempSuffix
 }
 
-// createTempInRoot creates an exclusive temp file in dir (relative to root),
-// retrying on a random-name collision the way os.CreateTemp does. It
-// returns the open file and its root-relative name. An escaping dir is
-// refused by root.OpenFile and surfaced as a PhaseTempCreate WriteError.
-//
-// It creates the staging file owner-only and PROVES it is owner-only before
-// returning it to be written into: the 0o600 passed to open(2) is only a
-// request, and on a filesystem carrying an inheritable group ACL the kernel
-// can store something wider (measured: a ZFS nfs4acl dataset stores 0770 for
-// this exact open). The temp lives in the target's own parent directory
-// (publishing is a same-filesystem rename), so a wider mode there leaves the
-// caller's payload group-writable for the whole duration of the write —
-// meaning the bytes renamed into place are not necessarily the bytes the
-// caller wrote. The random name only makes the temp hard to guess; the mode
-// enforcement is what makes it unreachable once found.
-func createTempInRoot(root *os.Root, dir string) (*os.File, string, error) {
+// createTempInRoot creates an exclusive temp in dir (relative to root),
+// retrying a name collision as os.CreateTemp does; a failure, an escaping dir
+// included, is a PhaseTempCreate WriteError. Under WithMode the temp is
+// created 0o600 and proved owner-only before any data goes into it; without
+// it the temp is created 0o666 like os.Create and its mode is never checked.
+func createTempInRoot(root *os.Root, dir string, c *cfg) (*os.File, string, error) {
+	perm := os.FileMode(0o666)
+	if c.modeSet {
+		perm = 0o600
+	}
 	for try := 0; ; try++ {
 		name := filepath.Join(dir, randomTempName())
-		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
-			if _, mErr := EnforceMode(f, 0o600); mErr != nil {
+			if !c.modeSet {
+				return f, name, nil
+			}
+			if _, mErr := enforceMode(f, 0o600); mErr != nil {
 				f.Close()
 				_ = root.Remove(name)
 				return nil, "", &WriteError{Phase: PhaseTempCreate, Err: mErr}
@@ -216,7 +213,7 @@ func enforceDirMode(root *os.Root, dir string, mode os.FileMode) error {
 		return err
 	}
 	defer d.Close()
-	_, err = EnforceMode(d, mode)
+	_, err = enforceMode(d, mode)
 	return err
 }
 
@@ -249,7 +246,7 @@ func commitTempInRoot(root *os.Root, tmpName, name, dir string, c *cfg) (durable
 // stagedTemp is what the pre-barrier preamble produces: the open temp file
 // plus the names and durability state the two barriers need to publish it.
 type stagedTemp struct {
-	// file is the open temp file, created owner-only and proved owner-only.
+	// file is the open temp file (see createTempInRoot for its mode).
 	file *os.File
 	// name is the cleaned final name, relative to root.
 	name string
@@ -291,7 +288,7 @@ func openTempForRoot(ctx context.Context, root *os.Root, name string, c *cfg) (s
 		}
 		dirSyncFailed = !durable
 	}
-	tmp, tmpName, err := createTempInRoot(root, dir)
+	tmp, tmpName, err := createTempInRoot(root, dir, c)
 	if err != nil {
 		return stagedTemp{}, err
 	}
@@ -336,14 +333,12 @@ func writeAtomicInRoot(ctx context.Context, root *os.Root, name string, c *cfg, 
 	return Result{Path: filepath.Join(root.Name(), st.name), Durable: durable && !st.dirSyncFailed}, nil
 }
 
-// WriteFileInRoot atomically writes data to name, a path relative to root,
-// with the same temp-then-rename durability and symlink refusal as
-// WriteFile but confined to root: every filesystem operation runs through
-// the *os.Root (Go 1.24+), so a symlink or ".." component in name can never
-// write outside root's tree. Mode defaults to 0o644 (override with
-// WithMode). A nil error means the data is at name; check Result.Durable
-// for crash durability. Result.Path is root's directory joined with the
-// cleaned relative name. A nil root returns ErrUnsafePath.
+// WriteFileInRoot is WriteFile for name, a path relative to root: every
+// filesystem operation runs through the *os.Root, so a symlink or ".."
+// component in name can never write outside root's tree. File mode: see
+// WithMode. A nil error means the data is at name; check Result.Durable for
+// crash durability. Result.Path is root's directory joined with the cleaned
+// relative name. A nil root returns ErrUnsafePath.
 func WriteFileInRoot(ctx context.Context, root *os.Root, name string, data []byte, opts ...Option) (Result, error) {
 	c := buildCfg(opts)
 	if err := checkWriteCap(int64(len(data)), c.maxBytes); err != nil {
@@ -355,8 +350,8 @@ func WriteFileInRoot(ctx context.Context, root *os.Root, name string, data []byt
 // WriteReaderInRoot atomically writes the contents of r to name, a path
 // relative to root, confined to root's tree (see WriteFileInRoot). If r
 // implements io.WriterTo it is used for efficient copying, so cancellation
-// is coarse on that path. Mode defaults to 0o644 (override with WithMode).
-// A nil root returns ErrUnsafePath.
+// is coarse on that path. File mode: see WithMode. A nil root returns
+// ErrUnsafePath.
 func WriteReaderInRoot(ctx context.Context, root *os.Root, name string, r io.Reader, opts ...Option) (Result, error) {
 	if root == nil {
 		return Result{}, fmt.Errorf("%w: nil root", ErrUnsafePath)
@@ -368,16 +363,12 @@ func WriteReaderInRoot(ctx context.Context, root *os.Root, name string, r io.Rea
 	return writeAtomicInRoot(ctx, root, name, c, copyReader(ctx, r, c.maxBytes))
 }
 
-// NewPendingFileInRoot creates a temp file destined to atomically replace
-// name, a path relative to root, with the same confinement as
-// WriteFileInRoot. Write to the returned PendingFile, then call Commit to
-// finalize or Cleanup to abort; the lifecycle is identical to
-// NewPendingFile. Mode defaults to 0o644 (override with WithMode). A nil
-// root returns ErrUnsafePath.
-//
-// The caller owns root and must keep it open for the PendingFile's
-// lifetime; the PendingFile never closes a caller-provided root.
-// Result.Path is root's directory joined with the cleaned relative name.
+// NewPendingFileInRoot is NewPendingFile for name, a path relative to root,
+// with WriteFileInRoot's confinement; the lifecycle is identical. File mode:
+// see WithMode. The caller owns root and must keep it open for the
+// PendingFile's lifetime; a caller-provided root is never closed.
+// Result.Path is root's directory joined with the cleaned relative name. A
+// nil root returns ErrUnsafePath.
 func NewPendingFileInRoot(ctx context.Context, root *os.Root, name string, opts ...Option) (*PendingFile, error) {
 	return newPendingFromRoot(ctx, root, name, false, buildCfg(opts))
 }

@@ -104,27 +104,14 @@ func (r ProbeResult) Writable() bool {
 	return r.OK() || r.Stage >= ProbeStageClose
 }
 
-// ProbeWritable proves dir is genuinely writable by doing what a real atomic
-// write does — create a temp file, write and flush a byte, close it, unlink
-// it — and reporting which stage failed.
-//
-// A mode-bit stat lies on an NFS/FUSE mount, a read-only bind mount, or a
-// Docker volume owned by another UID; this exercises the real path instead.
-//
-// `err != nil` means the probe could not be attempted at all (empty dir, or
-// a done context), never "not writable" — every filesystem outcome is
-// reported in the ProbeResult. See ProbeStage and ProbeResult.Writable.
-//
-// The probe file carries this package's temp-name shape (TempName), so a
-// leftover from a crash or a denied unlink is reclaimed by
-// CleanupStaleTemps.
-//
-// A missing dir fails at ProbeStageCreate; pass WithMkdirMode for
-// ProbeStageMkdir instead. dir may be relative, matching CleanupStaleTemps
-// rather than the write functions' absolute-path contract.
-//
-// ctx is checked once, before anything is created; a probe that has begun
-// always runs its own cleanup rather than abandoning a file.
+// ProbeWritable proves dir is writable by doing what an atomic write does
+// (create a temp, write and flush a byte, close, unlink) and reports the first
+// stage that failed in the ProbeResult; err != nil only means the probe could
+// not start (empty dir, done ctx). The probe file is a TempName, so a leftover
+// is reclaimed by CleanupStaleTemps. A missing dir fails at ProbeStageCreate
+// unless WithMkdirMode creates it; dir may be relative. Under WithMode the
+// probe must prove an owner-only staging file, as a write would. ctx is
+// checked once; a probe that has begun always runs its own cleanup.
 func ProbeWritable(ctx context.Context, dir string, opts ...Option) (ProbeResult, error) {
 	c := buildCfg(opts)
 	if dir == "" {
@@ -150,14 +137,11 @@ func ProbeWritable(ctx context.Context, dir string, opts ...Option) (ProbeResult
 }
 
 // ProbeWritableInRoot is ProbeWritable confined to root's tree: name is
-// relative to root ("." for root itself), and every operation runs through
-// the *os.Root, so a symlink or ".." component cannot escape it. An escaping
-// name is refused and reported as ProbeStageCreate (or ProbeStageMkdir under
-// WithMkdirMode).
-//
-// Outcome model, options, cancellation and reclaimability are identical to
-// ProbeWritable. The caller owns root; ProbeWritableInRoot does not close
-// it. A nil root returns ErrUnsafePath.
+// relative to root ("." for root itself) and every operation runs through
+// the *os.Root, so an escaping name is refused and reported at
+// ProbeStageCreate (ProbeStageMkdir under WithMkdirMode). Everything else,
+// the WithMode rule included, is ProbeWritable's. The caller owns root and
+// keeps it open; a nil root returns ErrUnsafePath.
 func ProbeWritableInRoot(ctx context.Context, root *os.Root, name string, opts ...Option) (ProbeResult, error) {
 	c := buildCfg(opts)
 	if root == nil {
@@ -186,7 +170,7 @@ func probeInRoot(root *os.Root, dir string, c *cfg) ProbeResult {
 			return ProbeResult{Dir: filepath.Join(root.Name(), dir), Stage: ProbeStageMkdir, Err: mkErr}
 		}
 	}
-	f, tmpName, err := createTempInRoot(root, dir)
+	f, tmpName, err := createTempInRoot(root, dir, c)
 	if err != nil {
 		return ProbeResult{Dir: filepath.Join(root.Name(), dir), Stage: ProbeStageCreate, Err: probeCause(err)}
 	}

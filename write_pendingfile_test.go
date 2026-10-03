@@ -371,14 +371,15 @@ func TestPendingFile_CommitThenCleanup_KeepsFile(t *testing.T) {
 // A failed Commit lands in the committed state with a cached *WriteError; a
 // second Commit must replay that identical error value and the same zero
 // Result, without re-running the barrier or leaking a temp. Closing the
-// embedded fd makes the barrier's first step (Chmod) fail, so this also
-// pins the PhaseTempChmod tag and the on-barrier-failure temp cleanup.
+// embedded fd makes the barrier's first step under WithMode (the mode
+// enforcement) fail, so this also pins the PhaseTempChmod tag and the
+// on-barrier-failure temp cleanup.
 func TestPendingFile_FailedCommit_ReplaysSameError(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "failed-commit-replay.txt")
 
-	pf, err := NewPendingFile(t.Context(), path)
+	pf, err := NewPendingFile(t.Context(), path, WithMode(0o600))
 	if err != nil {
 		t.Fatalf("NewPendingFile: %v", err)
 	}
