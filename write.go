@@ -125,12 +125,10 @@ func deepestExistingDir(dir string) (base, rel string, err error) {
 	}
 }
 
-// finalizeTempFile runs the temp-side durability barrier on an open temp
-// file that already holds its content: verify a WithMaxBytes cap against
-// the staged file's actual size (fstat, so bytes staged outside the
-// streaming interfaces can never publish an over-cap file), chmod to the
-// configured mode, fsync, then close. On any error before close it closes
-// the file and returns; the caller's deferred cleanup removes the temp.
+// finalizeTempFile runs the temp-side barrier on a staged temp: check a
+// WithMaxBytes cap against the fstat size (so bytes staged outside the
+// streaming interfaces cannot publish), enforce WithMode's mode when given,
+// fsync, close. On an error it closes the file; the caller removes the temp.
 func finalizeTempFile(ctx context.Context, tmp *os.File, c *cfg) error {
 	if err := ctx.Err(); err != nil {
 		tmp.Close()
@@ -147,11 +145,11 @@ func finalizeTempFile(ctx context.Context, tmp *os.File, c *cfg) error {
 			return fmt.Errorf("%w: staged file is %d bytes (max %d)", ErrFileTooLarge, fi.Size(), c.maxBytes)
 		}
 	}
-	// EnforceMode, not tmp.Chmod: a mode argument is a REQUEST, and a
-	// filesystem that refuses it must not silently publish a wider file.
-	if _, err := EnforceMode(tmp, c.mode); err != nil {
-		tmp.Close()
-		return &WriteError{Phase: PhaseTempChmod, Err: err}
+	if c.modeSet {
+		if _, err := enforceMode(tmp, c.mode); err != nil {
+			tmp.Close()
+			return &WriteError{Phase: PhaseTempChmod, Err: err}
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -184,9 +182,9 @@ func writeAtomic(ctx context.Context, path string, c *cfg, writeData func(*os.Fi
 	return res, nil
 }
 
-// WriteFile atomically writes data to path. Mode defaults to 0o644 (override
-// with WithMode). A nil error means the data is at path; check Result.Durable
-// for crash durability.
+// WriteFile atomically writes data to path. File mode: see WithMode. A nil
+// error means the data is at path; check Result.Durable for crash
+// durability.
 func WriteFile(ctx context.Context, path string, data []byte, opts ...Option) (Result, error) {
 	c := buildCfg(opts)
 	if err := checkWriteCap(int64(len(data)), c.maxBytes); err != nil {
@@ -260,11 +258,10 @@ func (wc writerCtx) Write(p []byte) (int, error) {
 	return wc.w.Write(p)
 }
 
-// WriteReader atomically writes the contents of r to path. Mode defaults to
-// 0o644 (override with WithMode). If r implements io.WriterTo it is used for
-// efficient copying, so cancellation is coarse on that path (per-chunk for
-// chunked sources, post-copy for single-shot sources). ctx is still honored
-// at the durability barrier, so a cancelled write leaves no partial target.
+// WriteReader atomically writes the contents of r to path. File mode: see
+// WithMode. An io.WriterTo r is used for efficient copying, so cancellation
+// is coarse on that path (per chunk, or after a single-shot copy); ctx is
+// still honored at the barrier, so a cancelled write leaves no partial target.
 func WriteReader(ctx context.Context, path string, r io.Reader, opts ...Option) (Result, error) {
 	if r == nil {
 		return Result{}, errors.New("atomicfile: nil reader")
@@ -369,9 +366,8 @@ func newPendingFromRoot(ctx context.Context, root *os.Root, name string, ownRoot
 }
 
 // NewPendingFile creates a temp file destined to atomically replace path.
-// Write to it, then call Commit to finalize or Cleanup to abort. Mode
-// defaults to 0o644 (override with WithMode). ctx is checked before the
-// temp is created.
+// Write to it, then call Commit to finalize or Cleanup to abort. File mode:
+// see WithMode. ctx is checked before the temp is created.
 func NewPendingFile(ctx context.Context, path string, opts ...Option) (*PendingFile, error) {
 	c := buildCfg(opts)
 	root, base, dirSyncFailed, err := openParentRoot(ctx, path, c)
@@ -472,15 +468,11 @@ func (p *PendingFile) closeOwnedRoot() {
 	}
 }
 
-// Commit runs the durability barrier (WithMaxBytes size verification,
-// chmod, fsync, close), atomically renames the temp into place, and fsyncs
-// the parent directory. Commit is idempotent: repeated calls return the
-// first result. Calling Commit after Cleanup returns ErrAborted. After a
-// successful Commit, Cleanup is a no-op. ctx is checked through the
-// temp-side barrier; a context cancelled at or before close aborts and
-// removes the temp. Once the barrier passes, the rename runs without a
-// further ctx check, so a context cancelled in the narrow window between
-// close and rename still commits.
+// Commit runs the durability barrier (WithMaxBytes size check, WithMode
+// enforcement, fsync, close), renames the temp into place and fsyncs the
+// parent directory. It is idempotent; after Cleanup it returns ErrAborted, and
+// after it Cleanup is a no-op. ctx is checked through close (a cancelled
+// context aborts and removes the temp), not between close and rename.
 func (p *PendingFile) Commit(ctx context.Context) (Result, error) {
 	switch p.state {
 	case pendingCommitted:

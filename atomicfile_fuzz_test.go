@@ -3,6 +3,7 @@ package atomicfile
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,15 +13,16 @@ import (
 )
 
 func FuzzWriteFile(f *testing.F) {
-	f.Add([]byte("hello"), "data.txt")
-	f.Add([]byte{}, "empty")
-	f.Add([]byte("\x00\xff\xfe"), "../escape")
-	f.Add([]byte("big"), "sub/dir/file.json")
+	f.Add([]byte("hello"), "data.txt", false)
+	f.Add([]byte("hello"), "data.txt", true)
+	f.Add([]byte{}, "empty", false)
+	f.Add([]byte("\x00\xff\xfe"), "../escape", true)
+	f.Add([]byte("big"), "sub/dir/file.json", false)
 
 	baseDir := f.TempDir()
 	ctx := f.Context()
 
-	f.Fuzz(func(t *testing.T, content []byte, name string) {
+	f.Fuzz(func(t *testing.T, content []byte, name string, withMode bool) {
 		if len(name) == 0 || len(name) > 255 {
 			return
 		}
@@ -30,9 +32,12 @@ func FuzzWriteFile(f *testing.F) {
 		}
 		path := filepath.Join(baseDir, base)
 
-		res, err := WriteFile(ctx, path, content)
+		res, err := WriteFile(ctx, path, content, fuzzModeOpts(withMode)...)
 		if err != nil {
 			return
+		}
+		if mErr := checkFuzzMode(path, withMode); mErr != nil {
+			t.Fatal(mErr)
 		}
 		if res.Path != path {
 			t.Fatalf("Result.Path = %q, want %q", res.Path, path)
@@ -148,18 +153,22 @@ func FuzzValidateAbsClean(f *testing.F) {
 }
 
 func FuzzWriteReader(f *testing.F) {
-	f.Add([]byte("hello"))
-	f.Add([]byte{})
-	f.Add([]byte("\x00\xff\xfe\xfd"))
+	f.Add([]byte("hello"), false)
+	f.Add([]byte("hello"), true)
+	f.Add([]byte{}, false)
+	f.Add([]byte("\x00\xff\xfe\xfd"), true)
 
 	baseDir := f.TempDir()
 	ctx := f.Context()
 
-	f.Fuzz(func(t *testing.T, content []byte) {
+	f.Fuzz(func(t *testing.T, content []byte, withMode bool) {
 		path := filepath.Join(baseDir, "fuzz_writer.dat")
 
-		if _, err := WriteReader(ctx, path, bytes.NewReader(content)); err != nil {
+		if _, err := WriteReader(ctx, path, bytes.NewReader(content), fuzzModeOpts(withMode)...); err != nil {
 			return
+		}
+		if mErr := checkFuzzMode(path, withMode); mErr != nil {
+			t.Fatal(mErr)
 		}
 
 		got, err := os.ReadFile(path)
@@ -291,11 +300,12 @@ func FuzzIsStaleTempName(f *testing.F) {
 }
 
 func FuzzPendingFileRoundTrip(f *testing.F) {
-	f.Add("file.txt", []byte("content"))
-	f.Add("", []byte{})
-	f.Add("../bad", []byte("x"))
+	f.Add("file.txt", []byte("content"), false)
+	f.Add("file.txt", []byte("content"), true)
+	f.Add("", []byte{}, false)
+	f.Add("../bad", []byte("x"), true)
 
-	f.Fuzz(func(t *testing.T, name string, content []byte) {
+	f.Fuzz(func(t *testing.T, name string, content []byte, withMode bool) {
 		baseDir := t.TempDir()
 		base := filepath.Base(name)
 		path := filepath.Join(baseDir, base)
@@ -303,7 +313,7 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 			path = name // exercise validation
 		}
 
-		pf, err := NewPendingFile(t.Context(), path)
+		pf, err := NewPendingFile(t.Context(), path, fuzzModeOpts(withMode)...)
 		if err != nil {
 			return
 		}
@@ -324,6 +334,9 @@ func FuzzPendingFileRoundTrip(f *testing.F) {
 		}
 		if !bytes.Equal(got, content) {
 			t.Fatalf("content mismatch")
+		}
+		if mErr := checkFuzzMode(res.Path, withMode); mErr != nil {
+			t.Fatal(mErr)
 		}
 
 		// No temp file may leak in baseDir.
@@ -407,15 +420,16 @@ func FuzzCleanupStaleTemps(f *testing.F) {
 }
 
 func FuzzWriteFileInRoot(f *testing.F) {
-	f.Add([]byte("payload"), "out.pfx")
-	f.Add([]byte{}, "a/../b.txt")
-	f.Add([]byte("x"), "../escape")
-	f.Add([]byte("y"), "nested/deep/file")
-	f.Add([]byte("z"), "/etc/passwd")
-	f.Add([]byte("n"), "has\x00null")
-	f.Add([]byte("\x00\xff"), "bin.dat")
+	f.Add([]byte("payload"), "out.pfx", true)
+	f.Add([]byte("payload"), "out.pfx", false)
+	f.Add([]byte{}, "a/../b.txt", false)
+	f.Add([]byte("x"), "../escape", true)
+	f.Add([]byte("y"), "nested/deep/file", false)
+	f.Add([]byte("z"), "/etc/passwd", false)
+	f.Add([]byte("n"), "has\x00null", true)
+	f.Add([]byte("\x00\xff"), "bin.dat", false)
 
-	f.Fuzz(func(t *testing.T, content []byte, name string) {
+	f.Fuzz(func(t *testing.T, content []byte, name string, withMode bool) {
 		dir := t.TempDir()
 		root, err := os.OpenRoot(dir)
 		if err != nil {
@@ -423,9 +437,13 @@ func FuzzWriteFileInRoot(f *testing.F) {
 		}
 		defer root.Close()
 
-		res, err := WriteFileInRoot(t.Context(), root, name, content, WithMkdirMode(0o755))
+		res, err := WriteFileInRoot(t.Context(), root, name, content,
+			append(fuzzModeOpts(withMode), WithMkdirMode(0o755))...)
 		if err != nil {
 			return
+		}
+		if mErr := checkFuzzMode(res.Path, withMode); mErr != nil {
+			t.Fatal(mErr)
 		}
 
 		got, err := os.ReadFile(res.Path)
@@ -462,16 +480,16 @@ var staleTempNameOracle = regexp.MustCompile(`^\.atomicfile-[0-9]+\.tmp$`)
 // file it cannot account for — either it removed it, or it says so in Leaked
 // and named it in Name, where the package's own sweep can reclaim it.
 func FuzzProbeWritable(f *testing.F) {
-	f.Add("probe-dir", true)
-	f.Add("probe-dir", false)
-	f.Add("nested/deeper", true)
-	f.Add(".atomicfile-1.tmp", false)
-	f.Add("\x80\x80", true)
+	f.Add("probe-dir", true, false)
+	f.Add("probe-dir", false, true)
+	f.Add("nested/deeper", true, true)
+	f.Add(".atomicfile-1.tmp", false, false)
+	f.Add("\x80\x80", true, false)
 
 	baseDir := f.TempDir()
 	ctx := f.Context()
 
-	f.Fuzz(func(t *testing.T, name string, mkdir bool) {
+	f.Fuzz(func(t *testing.T, name string, mkdir, withMode bool) {
 		if len(name) == 0 || len(name) > 200 || strings.ContainsRune(name, 0) {
 			return
 		}
@@ -481,7 +499,7 @@ func FuzzProbeWritable(f *testing.F) {
 		}
 		dir := filepath.Join(baseDir, base)
 
-		var opts []Option
+		opts := fuzzModeOpts(withMode)
 		if mkdir {
 			opts = append(opts, WithMkdirMode(0o750))
 		}
@@ -509,4 +527,26 @@ func FuzzProbeWritable(f *testing.F) {
 			}
 		}
 	})
+}
+
+func fuzzModeOpts(withMode bool) []Option {
+	if withMode {
+		return []Option{WithMode(0o600)}
+	}
+	return nil
+}
+
+func checkFuzzMode(path string, withMode bool) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	perm := fi.Mode().Perm()
+	switch {
+	case withMode && perm != 0o600:
+		return fmt.Errorf("%s: mode %#o under WithMode(0o600), want 0600", path, perm)
+	case !withMode && perm&^0o666 != 0:
+		return fmt.Errorf("%s: mode %#o without WithMode, want no bits beyond 0666", path, perm)
+	}
+	return nil
 }

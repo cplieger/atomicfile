@@ -15,8 +15,8 @@ import (
 func TestBuildCfg_Defaults(t *testing.T) {
 	t.Parallel()
 	c := buildCfg(nil)
-	if c.mode != 0o644 {
-		t.Errorf("default mode = %o, want 0644", c.mode)
+	if c.modeSet || c.mode != 0 {
+		t.Errorf("default mode = %o, modeSet = %v; want 0 and false (no mode requested)", c.mode, c.modeSet)
 	}
 	if c.logger == nil {
 		t.Error("logger is nil, want slog.Default()")
@@ -39,8 +39,14 @@ func TestOptions_Threading(t *testing.T) {
 
 	t.Run("WithMode", func(t *testing.T) {
 		t.Parallel()
-		if c := buildCfg([]Option{WithMode(0o755)}); c.mode != 0o755 {
-			t.Errorf("mode = %o, want 0755", c.mode)
+		if c := buildCfg([]Option{WithMode(0o755)}); c.mode != 0o755 || !c.modeSet {
+			t.Errorf("WithMode(0o755): mode = %o, modeSet = %v; want 0755 and true", c.mode, c.modeSet)
+		}
+	})
+	t.Run("WithMode_zero", func(t *testing.T) {
+		t.Parallel()
+		if c := buildCfg([]Option{WithMode(0)}); c.mode != 0 || !c.modeSet {
+			t.Errorf("WithMode(0): mode = %o, modeSet = %v; want 0 and true (an explicit 0000)", c.mode, c.modeSet)
 		}
 	})
 	t.Run("WithMkdirMode", func(t *testing.T) {
@@ -147,37 +153,22 @@ func TestOptions_NilElement(t *testing.T) {
 	})
 }
 
-// TestOptions_AllNil pins that an all-nil option slice falls back to the
-// default 0o644 mode rather than panicking.
+// Serial: withUmask is process-global.
 func TestOptions_AllNil(t *testing.T) {
-	t.Parallel()
 	if isWindows() {
 		t.Skip("file mode not meaningful on Windows")
 	}
+	withUmask(t, 0o027)
 	p := filepath.Join(t.TempDir(), "allnil.txt")
 	if _, err := WriteFile(t.Context(), p, []byte("x"), nil, nil, nil, nil); err != nil {
 		t.Fatalf("WriteFile all nils: %v", err)
 	}
-	fi, _ := os.Stat(p)
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("all-nil mode = %o, want 0644", fi.Mode().Perm())
-	}
-}
-
-// TestOptions_DefaultMode_WriteFile pins the 0o644 default end-to-end (not just
-// in buildCfg) for a write with no options.
-func TestOptions_DefaultMode_WriteFile(t *testing.T) {
-	t.Parallel()
-	if isWindows() {
-		t.Skip("file mode not meaningful on Windows")
-	}
-	p := filepath.Join(t.TempDir(), "dm.txt")
-	if _, err := WriteFile(t.Context(), p, []byte("x")); err != nil {
+	fi, err := os.Stat(p)
+	if err != nil {
 		t.Fatal(err)
 	}
-	fi, _ := os.Stat(p)
-	if fi.Mode().Perm() != 0o644 {
-		t.Fatalf("WriteFile default mode = %o, want 0644", fi.Mode().Perm())
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("all-nil mode under umask 027 = %o, want 0640", fi.Mode().Perm())
 	}
 }
 

@@ -1,6 +1,6 @@
 # atomicfile
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v3.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v3) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v4.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
 
 > Crash-safe atomic file writes for Go
 
@@ -14,7 +14,7 @@ Every write is `os.Root`-confined: the `*InRoot` APIs use the caller's root dire
 
 ## Install
 
-`go get github.com/cplieger/atomicfile/v3@latest`
+`go get github.com/cplieger/atomicfile/v4@latest`
 
 ## Usage
 
@@ -27,25 +27,26 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/atomicfile/v4"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// Atomic write with default mode (0644). The returned Result reports the
-	// final path and whether the write is crash-durable.
+	// Atomic write of an ordinary file, created like os.Create (0666 through
+	// the umask). The returned Result reports the final path and whether the
+	// write is crash-durable.
 	res, err := atomicfile.WriteFile(ctx, "/tmp/data.txt", []byte("hello"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	log.Printf("wrote %s (durable=%v)", res.Path, res.Durable)
 
-	// Atomic write with custom mode.
+	// Private file: WithMode enforces the mode on the staging and final file.
 	atomicfile.WriteFile(ctx, "/tmp/secret.txt", []byte("s3cr3t"),
 		atomicfile.WithMode(0o600))
 
-	// Streaming write from an io.Reader (mode via WithMode).
+	// Streaming write from an io.Reader, exactly 0644 whatever the umask.
 	atomicfile.WriteReader(ctx, "/tmp/stream.txt", strings.NewReader("streamed"),
 		atomicfile.WithMode(0o644))
 
@@ -84,7 +85,7 @@ func main() {
 
 All write primitives return `(Result, error)`; inspect `Result.Durable` for crash durability (see [Result and Durability](#result-and-durability) for the nil-error contract).
 
-- `WriteFile(ctx, path, data, opts ...Option) (Result, error)`: atomic write (default mode 0644)
+- `WriteFile(ctx, path, data, opts ...Option) (Result, error)`: atomic write (file mode: see `WithMode`)
 - `WriteReader(ctx, path, r, opts ...Option) (Result, error)`: atomic write from `io.Reader` (uses the `io.WriterTo` fast path when available; mode via `WithMode`)
 - `WriteFileInRoot(ctx, root, name, data, opts ...Option) (Result, error)`: atomic write of `data` to `name` relative to an `*os.Root`; every filesystem op runs through the root, so a symlink or `..` in `name` cannot escape its tree
 - `WriteReaderInRoot(ctx, root, name, r, opts ...Option) (Result, error)`: same, streaming from an `io.Reader`
@@ -93,7 +94,7 @@ All write primitives return `(Result, error)`; inspect `Result.Durable` for cras
 
 - `NewPendingFile(ctx, path, opts ...Option) (*PendingFile, error)`: open a temp file for incremental writing (mode via `WithMode`)
 - `NewPendingFileInRoot(ctx, root, name, opts ...Option) (*PendingFile, error)`: same, confined to an `*os.Root`: the temp, rename, and parent-dir fsync all run through the caller's root, which stays caller-owned (keep it open through Commit/Cleanup)
-- `(*PendingFile).Commit(ctx) (Result, error)`: chmod + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
+- `(*PendingFile).Commit(ctx) (Result, error)`: mode enforcement (under `WithMode`) + fsync + close + rename + dir-fsync (finalize). Idempotent: repeated calls return the first result. Returns `ErrAborted` if called after `Cleanup`.
 - `(*PendingFile).Cleanup() error`: close + remove (abort; no-op after Commit, idempotent). Safe to `defer` immediately after `NewPendingFile`.
 
 `PendingFile` embeds `*os.File`, so the full `io.Writer`/`io.ReaderFrom`/`fmt.Fprintf` surface is available, and `Name()` reports the staged temp's path for inspection before `Commit` publishes it. A `WithMaxBytes` cap is enforced as you write (`BytesWritten()` reports the count, `Truncate` re-syncs it, and a call that would cross the cap is rejected whole) and re-verified against the staged file's actual size at `Commit`, so bytes staged outside the tracked stream (`WriteAt`, `Write` after `Seek`, a reopen of the temp by path) cannot publish an over-cap file either.
@@ -132,6 +133,8 @@ type PrivateDir struct {
 ```
 
 A mode argument to `mkdir(2)` or `open(2)` is a **request**, not a result. `umask` narrows it, and a filesystem carrying an inheritable ACL can widen the outcome regardless of what was asked: measured on a ZFS `nfs4acl` dataset, an inheritable `group@:rwx` ACE stores **0770** for a `0o700` mkdir, and a child of an already-0700 parent comes back 0770 too, so a narrower parent does not cover it. `EnforceMode` is the chmod **and** the re-stat, on one descriptor, so the mode it returns is the mode the filesystem holds.
+
+Pass `WithMode` for any file whose readers must be restricted, such as credentials, configuration and backups. The write then fails with `ErrModeNotStored` rather than publish a file wider than asked, and the payload is never staged in a file others can open. Omit it for a file in a shared tree whose permissions an operator manages through umask or inherited ACLs, such as a media library. Such a file is created like `os.Create` and never chmod'ed, so the tree's own policy applies. Replacing an existing file without `WithMode` gives the new inode those creation defaults, not the old file's mode.
 
 `EnsurePrivateDir` composes that into the sequence a process needs when its private directory lives inside a parent other users can write (a state directory under `/tmp`, an admin-socket directory):
 
@@ -222,7 +225,7 @@ The zero `FileIdentity` records nothing and reports `Changed`, which is the fail
 
 A temp exists on disk between its creation and the rename that publishes it. Each write removes its own temp on every failure path, but a deferred removal only runs if the process lives to run it: **SIGKILL does not, and neither does Go's default SIGINT/SIGTERM handling**, which exits without unwinding. A power loss, an OOM kill, or a `docker stop` that escalates leaves a temp behind, and so does a `PendingFile` abandoned without `Commit` or `Cleanup`. Atomicity is unaffected (nothing was published and the previous file at the target is untouched), so an orphan costs disk, not correctness.
 
-**Nothing in this library reclaims them on its own.** There is no background sweeper, no finalizer, and no cleanup on the next write. Reclamation is `CleanupStaleTemps` / `CleanupStaleTempsInRoot`, called by the consumer where it knows a sweep is safe: at startup, or on a schedule.
+Nothing in this library reclaims them on its own. There is no background sweeper, no finalizer, and no cleanup on the next write. Reclamation is `CleanupStaleTemps` / `CleanupStaleTempsInRoot`, called by the consumer where it knows a sweep is safe, such as at startup or on a schedule. A finalizer would unlink with no ordering against a live `Commit`, so abandonment would work only sometimes, and an `O_TMPFILE` publish cannot replace an existing entry, so the named temp stays.
 
 **Picking `maxAge`.** It must exceed the longest time any concurrent writer may hold a temp: a sweep cannot tell an orphan from a write in progress, because POSIX offers no way to ask. The gate is the temp's **mtime**, not its creation time, so a streaming write that keeps producing bytes keeps refreshing it and is safe at any duration; what is at risk is a temp nothing has written to for `maxAge`. The realistic case is a `PendingFile` staged, then held across slow work, then committed: measured, with the temp backdated past a one-hour `maxAge` the sweep unlinked it and the following `Commit` failed with `*WriteError{PhaseRename}` wrapping `ENOENT`. Nothing was lost from the target; that write was. A non-positive `maxAge` skips the sweep with a `Warn` instead of reaping everything, so a zero from an unset config cannot empty a directory.
 
@@ -250,11 +253,11 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | Option                       | Description                                                                                                                                                                                                                                                                                    |
 |------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `WithLogger(l)`              | Custom `*slog.Logger` for diagnostic output (default: `slog.Default()`)                                                                                                                                                                                                                        |
-| `WithMode(mode)`             | File permission (default: `0o644`)                                                                                                                                                                                                                                                             |
+| `WithMode(mode)`             | File permission, enforced: the staging file is created 0600 and proved owner-only, the final mode is proved, and a refusal fails the write with `ErrModeNotStored`. Without it the file is created like `os.Create`: 0666 through the umask and inherited ACLs, not verified.                  |
 | `WithMkdirMode(mode)`        | Create the parent directory (and missing ancestors) with this mode before writing. Without it, a missing parent is an error. The mode is enforced on each directory created (a request through `mkdir(2)` is narrowed by umask and can be widened by an ACL) and each one's parent is fsynced. |
 | `WithRepairOwnedDir(repair)` | `EnsurePrivateDir` only: `true` repairs a **pre-existing** directory whose owner is already the effective uid, instead of refusing it; `false` keeps the default refusal. For adopting your own past output; ignored by writes.                                                                |
 | `WithRecursive(recursive)`   | Stale-temp sweeps only: `true` makes `CleanupStaleTemps` / `CleanupStaleTempsInRoot` descend into subdirectories; `false` keeps the default one-directory sweep. Ignored by writes.                                                                                                            |
-| `WithMaxBytes(n)`            | Cap staged content at `n` bytes, the write-side mirror of `ReadBounded`. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap.                                                                                                                      |
+| `WithMaxBytes(n)`            | Cap staged content at `n` bytes, the write-side mirror of `ReadBounded`. The cap is checked as bytes are staged and again against the staged file's size before the rename. Over-cap writes match `ErrFileTooLarge` and leave the previous target intact. `n <= 0` = no cap.                   |
 
 ## Errors
 
@@ -268,12 +271,12 @@ All write functions accept variadic `Option` values. Omit options for defaults.
 | `ErrNotDirectory`  | `EnsurePrivateDir`: the name is occupied by a file, FIFO, device node or socket                                           |
 | `ErrNotOwned`      | `EnsurePrivateDir`: the directory's owner is not the effective uid (or could not be determined)                           |
 | `ErrModeTooOpen`   | `EnsurePrivateDir`: a **pre-existing** dir grants group/other access, no repair opted in                                  |
-| `ErrModeNotStored` | `EnforceMode`: the mode read back after the chmod is not the mode that was asked for                                      |
+| `ErrModeNotStored` | `EnforceMode`, or a write under `WithMode`/`WithMkdirMode`: the filesystem stored a different mode than was asked for     |
 | `ErrAborted`       | `PendingFile.Commit` was called after `Cleanup` aborted the pending write                                                 |
 
 The package-level path check is not a containment boundary. `filepath.Clean` normalizes any `..` in an absolute path rather than rejecting it (for an absolute path there is nothing to escape), so `ErrUnsafePath` only guards against a non-absolute or null-byte path. Callers that need to confine writes to a directory tree use the `*os.Root`-backed write APIs (`WriteFileInRoot` / `WriteReaderInRoot`). Callers that need to confine reads should open the file through an `*os.Root` and pass that already-confined handle to `ReadBoundedFile`, which then applies the same size and context bounds.
 
-Failures in the write barrier (open destination / create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. `PhaseTempCreate` covers opening the destination for writing (a missing parent without `WithMkdirMode` surfaces here) as well as creating the temp file inside it. Pre-barrier failures keep their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All are inspectable with `errors.Is` / `errors.As`, and a `*WriteError` always means the data did **not** reach its final path.
+Failures in the write barrier (open destination / create temp, write, chmod, sync, close, rename) are reported as `*WriteError{Err, Phase}`, where `Phase` is one of `PhaseTempCreate`, `PhaseTempWrite`, `PhaseTempChmod`, `PhaseTempSync`, `PhaseTempClose`, or `PhaseRename`. `PhaseTempChmod` occurs only under `WithMode`. `PhaseTempCreate` covers opening the destination for writing (a missing parent without `WithMkdirMode` surfaces here) as well as creating the temp file inside it. Pre-barrier failures keep their own error types: path-validation and symlink failures use the sentinels above, context failures wrap the standard-library context error (`context.Canceled` / `context.DeadlineExceeded`), and a `WithMkdirMode` parent-directory creation failure wraps the underlying os error behind the `atomicfile:` prefix. All are inspectable with `errors.Is` / `errors.As`, and a `*WriteError` always means the data did **not** reach its final path.
 
 ## Symlink Safety
 
@@ -292,7 +295,6 @@ An `*os.Root` does not _pin_ a multi-component name: `OpenParentInRoot` and `Rem
 | **Windows rename-over semantics**   | Target platform is Linux. `os.Rename` is atomic on Linux. Windows cannot guarantee atomicity ([golang/go#22397](https://github.com/golang/go/issues/22397#issuecomment-498856679)). google/renameio also refuses Windows. |
 | **`fs.FS` interop**                 | `fs.FS` is a read-only interface. Atomic writes are inherently outside its scope.                                                                                                                                         |
 | **Atomic symlink replacement**      | Out of scope. Use google/renameio if needed.                                                                                                                                                                              |
-| **Umask-aware permissions**         | The library uses `Chmod` for exact permissions (ignoring umask). This is the correct secure default for server/CLI tools. Equivalent to renameio's `WithStaticPermissions`.                                               |
 | **`TempDir` cross-mount detection** | Temp files are always created in the target directory (same mount point), the only correct approach for atomic rename.                                                                                                    |
 
 ## Contributing
