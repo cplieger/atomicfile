@@ -136,7 +136,7 @@ The incremental `PendingFile` API, a staged file that is either committed into p
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants and how to run the checks.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
