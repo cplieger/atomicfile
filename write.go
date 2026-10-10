@@ -295,7 +295,7 @@ func copyReader(ctx context.Context, r io.Reader, maxBytes int64) func(*os.File)
 type pendingState uint8
 
 const (
-	pendingOpen          pendingState = iota // not yet committed or cleaned up
+	_                    pendingState = iota // zero value, the open state: must stay first
 	pendingCommitted                         // Commit was attempted; result/err are cached
 	pendingCleaned                           // Cleanup removed the temp; Commit now fails
 	pendingCleanupFailed                     // Cleanup closed the temp but removal failed; Commit still fails and Cleanup retries removal
