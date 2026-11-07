@@ -1,5 +1,8 @@
 # atomicfile
 
+> Moved to [`github.com/cplieger/go/filesafe`](https://github.com/cplieger/go/tree/dev/filesafe) and renamed `filesafe`.
+> **Archived 2026-11-07. This repository is read-only. The published Go module stays available.**
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/atomicfile/v4.svg)](https://pkg.go.dev/github.com/cplieger/atomicfile/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/atomicfile)](https://github.com/cplieger/atomicfile/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/atomicfile/badges/mutation.json)](https://github.com/cplieger/atomicfile/issues?q=label%3Agremlins-tracker)
 
 atomicfile writes files from Go so that a crash or a power loss leaves the complete old content or the complete new content, never a partial file.
